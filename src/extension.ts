@@ -23,6 +23,11 @@ export function activate(context: vscode.ExtensionContext): void {
     canSelectMany: true,
   });
 
+  function updateSearchMessage(): void {
+    const query = realProvider.getSearchQuery();
+    treeView.message = query ? `Filtering: "${query}"` : '';
+  }
+
   // ─── Status Bar ─────────────────────────────────────────────────────────────
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -39,6 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   updateStatusBar();
+  updateSearchMessage();
 
   // ─── Jump detection ──────────────────────────────────────────────────────────
 
@@ -48,6 +54,38 @@ export function activate(context: vscode.ExtensionContext): void {
   // Track whether we just initiated a navigation ourselves to avoid re-entrancy
   let lastRecordedUri: string | null = null;
   let lastRecordedLine = -1;
+  let lastObservedUri: string | null = null;
+  let lastObservedLine = -1;
+  let jumpActionArmedUntil = 0;
+
+  // Known jump/navigation actions. If one fires, the next command selection change is recorded.
+  const jumpCommandIds = new Set<string>([
+    'editor.action.revealDefinition',
+    'editor.action.revealDeclaration',
+    'editor.action.goToDeclaration',
+    'editor.action.goToTypeDefinition',
+    'editor.action.goToImplementation',
+    'editor.action.revealImplementation',
+    'editor.action.goToReferences',
+    'references-view.findReferences',
+    'workbench.action.navigateBack',
+    'workbench.action.navigateForward',
+    'workbench.action.navigateLast',
+  ]);
+
+  const commandApi = vscode.commands as unknown as {
+    onDidExecuteCommand?: (listener: (e: { command: string }) => void) => vscode.Disposable;
+  };
+
+  if (commandApi.onDidExecuteCommand) {
+    context.subscriptions.push(
+      commandApi.onDidExecuteCommand((e) => {
+        if (jumpCommandIds.has(e.command)) {
+          jumpActionArmedUntil = Date.now() + 1200;
+        }
+      })
+    );
+  }
 
   function getLineText(editor: vscode.TextEditor, line: number): string {
     try {
@@ -76,8 +114,24 @@ export function activate(context: vscode.ExtensionContext): void {
       const line = event.selections[0].active.line;
       const character = event.selections[0].active.character;
 
+      // Keep last observed cursor location updated for all events.
+      const prevObservedUri = lastObservedUri;
+      const prevObservedLine = lastObservedLine;
+      lastObservedUri = uri.toString();
+      lastObservedLine = line;
+
       // Normal in-file command jump
       if (event.kind !== vscode.TextEditorSelectionChangeKind.Command) {
+        return;
+      }
+
+      // If command execution telemetry is available, only record after a known jump action.
+      if (commandApi.onDidExecuteCommand && Date.now() > jumpActionArmedUntil) {
+        return;
+      }
+
+      // Must actually move to a different location than the immediate previous cursor spot.
+      if (prevObservedUri === uri.toString() && prevObservedLine === line) {
         return;
       }
 
@@ -376,6 +430,30 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.search', async () => {
+      const current = realProvider.getSearchQuery();
+      const input = await vscode.window.showInputBox({
+        title: 'Search Jump History',
+        prompt: 'Filter by file name, path, snippet, source, or line number',
+        value: current,
+        placeHolder: 'e.g. render.rs, L50, run_loop, command-jump',
+      });
+      if (input === undefined) {
+        return;
+      }
+      realProvider.setSearchQuery(input);
+      updateSearchMessage();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.clearSearch', () => {
+      realProvider.clearSearch();
+      updateSearchMessage();
+    })
+  );
+
   // ─── Config change watcher ─────────────────────────────────────────────────
 
   context.subscriptions.push(
@@ -383,6 +461,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.affectsConfiguration('jumpHistory')) {
         realProvider.refresh();
         updateStatusBar();
+        updateSearchMessage();
       }
     })
   );

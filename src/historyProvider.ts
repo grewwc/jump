@@ -34,11 +34,26 @@ export class EntryNode {
 export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+  private searchQuery = '';
 
   constructor(private readonly manager: HistoryManager) { }
 
   refresh(): void {
     this._onDidChangeTreeData.fire();
+  }
+
+  setSearchQuery(query: string): void {
+    this.searchQuery = query.trim().toLowerCase();
+    this.refresh();
+  }
+
+  clearSearch(): void {
+    this.searchQuery = '';
+    this.refresh();
+  }
+
+  getSearchQuery(): string {
+    return this.searchQuery;
   }
 
   // ─── TreeDataProvider ──────────────────────────────────────────────────────
@@ -82,7 +97,9 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
 
     // Hot Spots always at the top
     if (showHotSpots) {
-      const spots = this.manager.getHotSpots(hotSpotsCount, hotSpotsMinVisits);
+      const spots = this.manager
+        .getHotSpots(hotSpotsCount, hotSpotsMinVisits)
+        .filter((s) => this.matchesHotSpot(s));
       if (spots.length > 0) {
         roots.push(new HotSpotsGroupNode(spots));
       }
@@ -91,15 +108,36 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
     if (groupByFile) {
       const grouped = this.manager.getGroupedByFile();
       for (const [uri, entries] of grouped) {
-        roots.push(new FileGroupNode(uri, entries));
+        const filtered = entries.filter((e) => this.matchesEntry(e));
+        if (filtered.length > 0) {
+          roots.push(new FileGroupNode(uri, filtered));
+        }
       }
     } else {
-      for (const e of this.manager.getFlat()) {
+      for (const e of this.manager.getFlat().filter((entry) => this.matchesEntry(entry))) {
         roots.push(new EntryNode(e));
       }
     }
 
     return roots;
+  }
+
+  private matchesEntry(e: JumpEntry): boolean {
+    if (!this.searchQuery) {
+      return true;
+    }
+    const displayName = HistoryManager.displayName(e.uri);
+    const haystack = `${displayName} ${e.line + 1} ${e.lineText} ${e.source}`.toLowerCase();
+    return haystack.includes(this.searchQuery);
+  }
+
+  private matchesHotSpot(h: HotSpot): boolean {
+    if (!this.searchQuery) {
+      return true;
+    }
+    const displayName = HistoryManager.displayName(h.uri);
+    const haystack = `${displayName} ${h.line + 1} ${h.lineText} ${h.count}`.toLowerCase();
+    return haystack.includes(this.searchQuery);
   }
 
   // ─── Hot Spots items ────────────────────────────────────────────────────

@@ -110,10 +110,32 @@
         "title": "Refresh",
         "category": "Jump History",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "jumpHistory.search",
+        "title": "Search Jump History",
+        "category": "Jump History",
+        "icon": "$(search)"
+      },
+      {
+        "command": "jumpHistory.clearSearch",
+        "title": "Clear Search",
+        "category": "Jump History",
+        "icon": "$(close)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "jumpHistory.search",
+          "when": "view == jumpHistoryTree",
+          "group": "navigation@0"
+        },
+        {
+          "command": "jumpHistory.clearSearch",
+          "when": "view == jumpHistoryTree",
+          "group": "navigation@0.5"
+        },
         {
           "command": "jumpHistory.toggleGroupByFile",
           "when": "view == jumpHistoryTree",
@@ -173,6 +195,16 @@
         "command": "jumpHistory.deleteSelected",
         "key": "delete",
         "mac": "backspace",
+        "when": "focusedView == jumpHistoryTree && listFocus"
+      },
+      {
+        "command": "jumpHistory.search",
+        "key": "cmd+f",
+        "when": "focusedView == jumpHistoryTree && listFocus"
+      },
+      {
+        "command": "jumpHistory.search",
+        "key": "ctrl+f",
         "when": "focusedView == jumpHistoryTree && listFocus"
       }
     ],

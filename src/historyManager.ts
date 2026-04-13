@@ -60,10 +60,6 @@ export class HistoryManager {
     return vscode.workspace.getConfiguration('jumpHistory').get<number>('maxEntries', 500);
   }
 
-  private lineThreshold(): number {
-    return vscode.workspace.getConfiguration('jumpHistory').get<number>('lineJumpThreshold', 10);
-  }
-
   // ─── Add entry ────────────────────────────────────────────────────────────
 
   /**
@@ -83,14 +79,6 @@ export class HistoryManager {
       const samePlace =
         this.lastEntry.uri === uriStr && this.lastEntry.line === line;
       if (samePlace) {
-        return false;
-      }
-    }
-
-    // For command-jumps in the same file, require minimum line distance
-    if (source === 'command-jump' && this.lastEntry?.uri === uriStr) {
-      const dist = Math.abs(line - this.lastEntry.line);
-      if (dist < this.lineThreshold()) {
         return false;
       }
     }
