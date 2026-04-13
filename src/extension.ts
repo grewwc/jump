@@ -60,35 +60,57 @@ export function activate(context: vscode.ExtensionContext): void {
     return '';
   }
 
-  // File switch: always record
+  // File switch: delay recording to let VS Code restore the real cursor position.
+  // When switching files, the editor's selection is initially (0,0) before VS Code
+  // restores the actual cursor position. We wait briefly for the real position.
+  let pendingFileSwitch: ReturnType<typeof setTimeout> | null = null;
+  let pendingUri: vscode.Uri | null = null;
+
+  function commitFileSwitch(editor: vscode.TextEditor): void {
+    const uri = editor.document.uri;
+    const line = editor.selection.active.line;
+    const character = editor.selection.active.character;
+    const lineText = getLineText(editor, line);
+    manager.addEntry(uri, line, character, lineText, 'file-switch');
+    lastRecordedUri = uri.toString();
+    lastRecordedLine = line;
+    pendingUri = null;
+  }
+
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (!editor || suppressRecording) {
         return;
       }
-      // Skip untitled / output / git-diff schemes
       const scheme = editor.document.uri.scheme;
       if (scheme !== 'file') {
         return;
       }
 
-      const uri = editor.document.uri;
-      const line = editor.selection.active.line;
-      const character = editor.selection.active.character;
-      const lineText = getLineText(editor, line);
+      // Cancel any previous pending file switch
+      if (pendingFileSwitch) {
+        clearTimeout(pendingFileSwitch);
+        pendingFileSwitch = null;
+      }
 
-      manager.addEntry(uri, line, character, lineText, 'file-switch');
-      lastRecordedUri = uri.toString();
-      lastRecordedLine = line;
+      pendingUri = editor.document.uri;
+
+      // Wait 150ms for the real cursor position to settle
+      pendingFileSwitch = setTimeout(() => {
+        pendingFileSwitch = null;
+        // Re-check the editor is still active
+        const current = vscode.window.activeTextEditor;
+        if (current && current.document.uri.toString() === pendingUri?.toString()) {
+          commitFileSwitch(current);
+        }
+        pendingUri = null;
+      }, 150);
     })
   );
 
   // In-file command jumps (Go to Def, Find usage, etc.)
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection((event) => {
-      if (event.kind !== vscode.TextEditorSelectionChangeKind.Command) {
-        return;
-      }
       if (suppressRecording) {
         return;
       }
@@ -100,6 +122,25 @@ export function activate(context: vscode.ExtensionContext): void {
       const uri = editor.document.uri;
       const line = event.selections[0].active.line;
       const character = event.selections[0].active.character;
+
+      // If there's a pending file switch for this file, the selection event
+      // carries the real cursor position — commit immediately with it.
+      if (pendingFileSwitch && pendingUri?.toString() === uri.toString()) {
+        clearTimeout(pendingFileSwitch);
+        pendingFileSwitch = null;
+        pendingUri = null;
+        const lineText = getLineText(editor, line);
+        manager.addEntry(uri, line, character, lineText, 'file-switch');
+        lastRecordedUri = uri.toString();
+        lastRecordedLine = line;
+        return;
+      }
+
+      // Normal in-file command jump
+      if (event.kind !== vscode.TextEditorSelectionChangeKind.Command) {
+        return;
+      }
+
       const lineText = getLineText(editor, line);
 
       // Skip if this is just the same position we already recorded
