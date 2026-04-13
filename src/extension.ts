@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { HistoryManager, JumpEntry } from './historyManager';
-import { NavHistoryProvider, EntryNode, FileGroupNode } from './historyProvider';
+import { NavHistoryProvider, EntryNode, FileGroupNode, HotSpotEntryNode, TreeNode } from './historyProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
   // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -20,6 +20,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const treeView = vscode.window.createTreeView('jumpHistoryTree', {
     treeDataProvider: realProvider,
     showCollapseAll: true,
+    canSelectMany: true,
   });
 
   // ─── Status Bar ─────────────────────────────────────────────────────────────
@@ -41,6 +42,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ─── Jump detection ──────────────────────────────────────────────────────────
 
+  // Suppression flag: when navigating via our own tree, don't re-record
+  let suppressRecording = false;
+
   // Track whether we just initiated a navigation ourselves to avoid re-entrancy
   let lastRecordedUri: string | null = null;
   let lastRecordedLine = -1;
@@ -59,7 +63,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // File switch: always record
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (!editor) {
+      if (!editor || suppressRecording) {
         return;
       }
       // Skip untitled / output / git-diff schemes
@@ -83,6 +87,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection((event) => {
       if (event.kind !== vscode.TextEditorSelectionChangeKind.Command) {
+        return;
+      }
+      if (suppressRecording) {
         return;
       }
       const editor = event.textEditor;
@@ -145,6 +152,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       try {
+        suppressRecording = true;
         const uri = vscode.Uri.parse(entry.uri);
         const position = new vscode.Position(entry.line, entry.character);
         const range = new vscode.Range(position, position);
@@ -154,6 +162,8 @@ export function activate(context: vscode.ExtensionContext): void {
         });
       } catch (err) {
         vscode.window.showErrorMessage(`Jump History: failed to open file — ${err}`);
+      } finally {
+        setTimeout(() => { suppressRecording = false; }, 300);
       }
     })
   );
@@ -162,6 +172,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('jumpHistory.navigateToLine', async (uriStr: string, line: number) => {
       try {
+        suppressRecording = true;
         const uri = vscode.Uri.parse(uriStr);
         const position = new vscode.Position(line, 0);
         const range = new vscode.Range(position, position);
@@ -171,6 +182,8 @@ export function activate(context: vscode.ExtensionContext): void {
         });
       } catch (err) {
         vscode.window.showErrorMessage(`Jump History: failed to open file — ${err}`);
+      } finally {
+        setTimeout(() => { suppressRecording = false; }, 300);
       }
     })
   );
@@ -246,35 +259,68 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  context.subscriptions.push(
-    vscode.commands.registerCommand('jumpHistory.deleteEntry', (node: EntryNode) => {
-      if (node?.kind === 'entry') {
-        manager.deleteEntry(node.entry.id);
+  // Helper: delete an array of tree nodes in one batch
+  function deleteNodes(nodes: readonly TreeNode[]): void {
+    const ids: string[] = [];
+    const locs: { uri: string; line: number }[] = [];
+    for (const node of nodes) {
+      if (node.kind === 'entry') {
+        ids.push(node.entry.id);
+      } else if (node.kind === 'hotSpotEntry') {
+        locs.push({ uri: node.spot.uri, line: node.spot.line });
       }
+      // fileGroup / hotSpotsGroup: not deletable via batch
+    }
+    if (ids.length > 0 || locs.length > 0) {
+      manager.batchDelete(ids, locs);
+    }
+  }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.deleteEntry', (node: EntryNode | HotSpotEntryNode, allSelected?: TreeNode[]) => {
+      // When multi-select is active, allSelected contains all highlighted items
+      const targets = allSelected && allSelected.length > 0 ? allSelected : (node ? [node] : []);
+      deleteNodes(targets);
+    })
+  );
+
+  // Keyboard shortcut command: deletes whatever is currently selected in the tree
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.deleteSelected', () => {
+      const selected = treeView.selection;
+      if (selected.length === 0) { return; }
+      deleteNodes(selected);
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('jumpHistory.pinEntry', (node: EntryNode) => {
+    vscode.commands.registerCommand('jumpHistory.pinEntry', (node: EntryNode | HotSpotEntryNode) => {
       if (node?.kind === 'entry') {
         manager.pinEntry(node.entry.id, true);
+      } else if (node?.kind === 'hotSpotEntry') {
+        manager.pinByLocation(node.spot.uri, node.spot.line, true);
       }
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('jumpHistory.unpinEntry', (node: EntryNode) => {
+    vscode.commands.registerCommand('jumpHistory.unpinEntry', (node: EntryNode | HotSpotEntryNode) => {
       if (node?.kind === 'entry') {
         manager.pinEntry(node.entry.id, false);
+      } else if (node?.kind === 'hotSpotEntry') {
+        manager.pinByLocation(node.spot.uri, node.spot.line, false);
       }
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('jumpHistory.copyPath', (node: EntryNode) => {
-      if (node?.kind === 'entry') {
+    vscode.commands.registerCommand('jumpHistory.copyPath', (node: EntryNode | HotSpotEntryNode) => {
+      const uriStr = node?.kind === 'entry' ? node.entry.uri
+        : node?.kind === 'hotSpotEntry' ? node.spot.uri
+          : undefined;
+      if (uriStr) {
         try {
-          const fsPath = vscode.Uri.parse(node.entry.uri).fsPath;
+          const fsPath = vscode.Uri.parse(uriStr).fsPath;
           vscode.env.clipboard.writeText(fsPath);
           vscode.window.showInformationMessage(`Copied: ${fsPath}`);
         } catch {

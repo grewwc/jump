@@ -59,6 +59,12 @@
         "icon": "$(close)"
       },
       {
+        "command": "jumpHistory.deleteSelected",
+        "title": "Delete Selected Entries",
+        "category": "Jump History",
+        "icon": "$(close)"
+      },
+      {
         "command": "jumpHistory.pinEntry",
         "title": "Pin Entry",
         "category": "Jump History",
@@ -115,22 +121,22 @@
       "view/item/context": [
         {
           "command": "jumpHistory.pinEntry",
-          "when": "view == jumpHistoryTree && viewItem == entry",
+          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == hotSpotEntry)",
           "group": "1_pin@1"
         },
         {
           "command": "jumpHistory.unpinEntry",
-          "when": "view == jumpHistoryTree && viewItem == entryPinned",
-          "group": "1_pin@1"
+          "when": "view == jumpHistoryTree && (viewItem == entryPinned || viewItem == hotSpotEntry)",
+          "group": "1_pin@2"
         },
         {
           "command": "jumpHistory.deleteEntry",
-          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted)",
+          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted || viewItem == hotSpotEntry)",
           "group": "2_modify@1"
         },
         {
           "command": "jumpHistory.copyPath",
-          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted)",
+          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted || viewItem == hotSpotEntry)",
           "group": "3_copy@1"
         },
         {
@@ -140,6 +146,14 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "jumpHistory.deleteSelected",
+        "key": "delete",
+        "mac": "backspace",
+        "when": "focusedView == jumpHistoryTree && listFocus"
+      }
+    ],
     "configuration": {
       "title": "Jump History",
       "properties": {

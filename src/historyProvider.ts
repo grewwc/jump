@@ -161,28 +161,34 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
     const displayName = HistoryManager.displayName(node.uri);
     const basename = path.basename(displayName);
     const dir = path.dirname(displayName);
+    const ext = path.extname(basename).slice(1);
 
     const item = new vscode.TreeItem(
       basename,
-      vscode.TreeItemCollapsibleState.Expanded
+      vscode.TreeItemCollapsibleState.Collapsed
     );
 
     const pinnedCount = node.entries.filter((e) => e.pinned).length;
     const deletedCount = node.entries.filter((e) => e.deleted).length;
     const total = node.entries.length;
 
-    let badge = `${total} jump${total !== 1 ? 's' : ''}`;
-    if (pinnedCount > 0) {
-      badge += ` · ${pinnedCount} pinned`;
-    }
+    const parts: string[] = [];
+    if (dir !== '.') { parts.push(dir); }
+    parts.push(`${total} jump${total !== 1 ? 's' : ''}`);
+    if (pinnedCount > 0) { parts.push(`${pinnedCount} pinned`); }
+    item.description = parts.join(' · ');
 
-    item.description = dir !== '.' ? dir : '';
     item.tooltip = new vscode.MarkdownString(
-      `**${displayName}**\n\n${badge}${deletedCount > 0 ? `\n\n⚠️ File deleted` : ''}`
+      `**${displayName}**\n\n${parts.slice(dir !== '.' ? 1 : 0).join(' · ')}${deletedCount > 0 ? `\n\n⚠️ File deleted` : ''}`
     );
     item.iconPath = deletedCount > 0
       ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'))
-      : new vscode.ThemeIcon('file-code');
+      : vscode.ThemeIcon.File;
+
+    // Set resourceUri to get proper file icons from the theme
+    try {
+      item.resourceUri = vscode.Uri.parse(node.uri);
+    } catch { /* ignore */ }
 
     item.contextValue = 'fileGroup';
     return item;
@@ -192,25 +198,29 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
 
   private makeEntryItem(node: EntryNode): vscode.TreeItem {
     const e = node.entry;
-    const lineLabel = `L${e.line + 1}`;
     const snippet = e.lineText || '(empty line)';
+    const relTime = formatRelativeTime(e.timestamp);
+    const sourceIcon = e.source === 'file-switch' ? '⇢' : '⚡';
 
-    const labelText = e.pinned ? `$(pinned) ${lineLabel}` : lineLabel;
-    const item = new vscode.TreeItem(labelText, vscode.TreeItemCollapsibleState.None);
+    // Label: "L42 · snippet"  — compact and readable
+    const item = new vscode.TreeItem(
+      `L${e.line + 1}`,
+      vscode.TreeItemCollapsibleState.None
+    );
 
-    item.description = snippet;
+    // Description: source icon + snippet + relative time
+    item.description = `${sourceIcon} ${snippet}  ·  ${relTime}`;
     item.tooltip = this.makeEntryTooltip(e);
 
     if (e.deleted) {
       item.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'));
       item.contextValue = 'entryDeleted';
-      // No command — clicking shows an info message (handled in extension.ts via tree.onDidChangeSelection)
     } else if (e.pinned) {
       item.iconPath = new vscode.ThemeIcon('pinned', new vscode.ThemeColor('charts.yellow'));
       item.contextValue = 'entryPinned';
       item.command = this.makeNavigateCommand(e);
     } else {
-      item.iconPath = new vscode.ThemeIcon('location');
+      item.iconPath = new vscode.ThemeIcon('circle-small-filled', new vscode.ThemeColor('descriptionForeground'));
       item.contextValue = 'entry';
       item.command = this.makeNavigateCommand(e);
     }

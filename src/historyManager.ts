@@ -78,13 +78,11 @@ export class HistoryManager {
   ): boolean {
     const uriStr = uri.toString();
 
-    // Deduplicate: same file+line within dedup window
+    // Deduplicate: never record the exact same (uri, line) as the most recent entry
     if (this.lastEntry) {
       const samePlace =
         this.lastEntry.uri === uriStr && this.lastEntry.line === line;
-      const withinWindow =
-        Date.now() - this.lastEntry.timestamp < DEDUP_WINDOW_MS;
-      if (samePlace && withinWindow) {
+      if (samePlace) {
         return false;
       }
     }
@@ -360,6 +358,55 @@ export class HistoryManager {
       .filter((h) => h.count >= minVisits)
       .sort((a, b) => b.count - a.count || b.lastTimestamp - a.lastTimestamp)
       .slice(0, topN);
+  }
+
+  /** Pin or unpin all entries at a given (uri, line) location. */
+  pinByLocation(uri: string, line: number, pinned: boolean): void {
+    let changed = false;
+    for (const e of this.entries) {
+      if (e.uri === uri && e.line === line && e.pinned !== pinned) {
+        e.pinned = pinned;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.save();
+      this.onChange();
+    }
+  }
+
+  /** Delete all entries at a given (uri, line) location. */
+  deleteByLocation(uri: string, line: number): void {
+    const before = this.entries.length;
+    this.entries = this.entries.filter((e) => !(e.uri === uri && e.line === line));
+    if (this.entries.length !== before) {
+      if (this.lastEntry?.uri === uri && this.lastEntry?.line === line) {
+        this.lastEntry = this.entries[0] ?? null;
+      }
+      this.save();
+      this.onChange();
+    }
+  }
+
+  /**
+   * Batch delete: removes all entries matching any of the given ids,
+   * or any entry at any of the given (uri, line) locations.
+   * Saves and fires onChange only once.
+   */
+  batchDelete(entryIds: string[], locations: { uri: string; line: number }[] = []): void {
+    const idSet = new Set(entryIds);
+    const locSet = new Set(locations.map((l) => `${l.uri}::${l.line}`));
+    const before = this.entries.length;
+    this.entries = this.entries.filter((e) => {
+      if (idSet.has(e.id)) { return false; }
+      if (locSet.has(`${e.uri}::${e.line}`)) { return false; }
+      return true;
+    });
+    if (this.entries.length !== before) {
+      this.lastEntry = this.entries[0] ?? null;
+      this.save();
+      this.onChange();
+    }
   }
 
   /** Flat list: pinned first (newest first), then non-pinned (newest first). */
