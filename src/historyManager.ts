@@ -302,6 +302,38 @@ export class HistoryManager {
     return this.entries;
   }
 
+  /** Find the previous/next entry relative to a specific entry id in current timeline order. */
+  getNeighborById(id: string, direction: 'next' | 'prev'): JumpEntry | undefined {
+    const idx = this.entries.findIndex((e) => e.id === id);
+    if (idx < 0) {
+      return undefined;
+    }
+    if (direction === 'next') {
+      return this.entries[idx + 1];
+    }
+    if (idx > 0) {
+      return this.entries[idx - 1];
+    }
+    return undefined;
+  }
+
+  /**
+   * For aggregated nodes (hot spots), resolve neighbor from the newest matching location.
+   */
+  getNeighborByLocation(uri: string, line: number, direction: 'next' | 'prev'): JumpEntry | undefined {
+    const idx = this.entries.findIndex((e) => e.uri === uri && e.line === line);
+    if (idx < 0) {
+      return undefined;
+    }
+    if (direction === 'next') {
+      return this.entries[idx + 1];
+    }
+    if (idx > 0) {
+      return this.entries[idx - 1];
+    }
+    return undefined;
+  }
+
   /** Returns entries grouped by file URI. Pinned entries appear first within each group. */
   getGroupedByFile(): Map<string, JumpEntry[]> {
     const map = new Map<string, JumpEntry[]>();

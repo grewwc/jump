@@ -83,6 +83,18 @@
         "icon": "$(copy)"
       },
       {
+        "command": "jumpHistory.jumpToPrevious",
+        "title": "Jump To Previous",
+        "category": "Jump History",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "jumpHistory.jumpToNext",
+        "title": "Jump To Next",
+        "category": "Jump History",
+        "icon": "$(arrow-down)"
+      },
+      {
         "command": "jumpHistory.deleteFileGroup",
         "title": "Remove All Entries for This File",
         "category": "Jump History"
@@ -138,6 +150,16 @@
           "command": "jumpHistory.copyPath",
           "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted || viewItem == hotSpotEntry)",
           "group": "3_copy@1"
+        },
+        {
+          "command": "jumpHistory.jumpToPrevious",
+          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted || viewItem == hotSpotEntry)",
+          "group": "4_nav@1"
+        },
+        {
+          "command": "jumpHistory.jumpToNext",
+          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted || viewItem == hotSpotEntry)",
+          "group": "4_nav@2"
         },
         {
           "command": "jumpHistory.deleteFileGroup",

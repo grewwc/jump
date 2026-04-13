@@ -60,55 +60,8 @@ export function activate(context: vscode.ExtensionContext): void {
     return '';
   }
 
-  // File switch: delay recording to let VS Code restore the real cursor position.
-  // When switching files, the editor's selection is initially (0,0) before VS Code
-  // restores the actual cursor position. We wait briefly for the real position.
-  let pendingFileSwitch: ReturnType<typeof setTimeout> | null = null;
-  let pendingUri: vscode.Uri | null = null;
-
-  function commitFileSwitch(editor: vscode.TextEditor): void {
-    const uri = editor.document.uri;
-    const line = editor.selection.active.line;
-    const character = editor.selection.active.character;
-    const lineText = getLineText(editor, line);
-    manager.addEntry(uri, line, character, lineText, 'file-switch');
-    lastRecordedUri = uri.toString();
-    lastRecordedLine = line;
-    pendingUri = null;
-  }
-
-  context.subscriptions.push(
-    vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (!editor || suppressRecording) {
-        return;
-      }
-      const scheme = editor.document.uri.scheme;
-      if (scheme !== 'file') {
-        return;
-      }
-
-      // Cancel any previous pending file switch
-      if (pendingFileSwitch) {
-        clearTimeout(pendingFileSwitch);
-        pendingFileSwitch = null;
-      }
-
-      pendingUri = editor.document.uri;
-
-      // Wait 150ms for the real cursor position to settle
-      pendingFileSwitch = setTimeout(() => {
-        pendingFileSwitch = null;
-        // Re-check the editor is still active
-        const current = vscode.window.activeTextEditor;
-        if (current && current.document.uri.toString() === pendingUri?.toString()) {
-          commitFileSwitch(current);
-        }
-        pendingUri = null;
-      }, 150);
-    })
-  );
-
-  // In-file command jumps (Go to Def, Find usage, etc.)
+  // Record only command-triggered jumps (Go to Def/References/Navigate Back/Forward).
+  // This avoids noise from plain file focus changes, tab switching, and panel interactions.
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection((event) => {
       if (suppressRecording) {
@@ -122,19 +75,6 @@ export function activate(context: vscode.ExtensionContext): void {
       const uri = editor.document.uri;
       const line = event.selections[0].active.line;
       const character = event.selections[0].active.character;
-
-      // If there's a pending file switch for this file, the selection event
-      // carries the real cursor position — commit immediately with it.
-      if (pendingFileSwitch && pendingUri?.toString() === uri.toString()) {
-        clearTimeout(pendingFileSwitch);
-        pendingFileSwitch = null;
-        pendingUri = null;
-        const lineText = getLineText(editor, line);
-        manager.addEntry(uri, line, character, lineText, 'file-switch');
-        lastRecordedUri = uri.toString();
-        lastRecordedLine = line;
-        return;
-      }
 
       // Normal in-file command jump
       if (event.kind !== vscode.TextEditorSelectionChangeKind.Command) {
@@ -208,6 +148,13 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     })
   );
+
+  async function navigateEntry(entry: JumpEntry | undefined): Promise<void> {
+    if (!entry) {
+      return;
+    }
+    await vscode.commands.executeCommand('jumpHistory.navigateTo', entry);
+  }
 
   // Internal command used by hot spot tree items
   context.subscriptions.push(
@@ -368,6 +315,30 @@ export function activate(context: vscode.ExtensionContext): void {
           vscode.window.showErrorMessage('Jump History: Failed to copy path');
         }
       }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.jumpToPrevious', async (node: EntryNode | HotSpotEntryNode) => {
+      let target: JumpEntry | undefined;
+      if (node?.kind === 'entry') {
+        target = manager.getNeighborById(node.entry.id, 'prev');
+      } else if (node?.kind === 'hotSpotEntry') {
+        target = manager.getNeighborByLocation(node.spot.uri, node.spot.line, 'prev');
+      }
+      await navigateEntry(target);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.jumpToNext', async (node: EntryNode | HotSpotEntryNode) => {
+      let target: JumpEntry | undefined;
+      if (node?.kind === 'entry') {
+        target = manager.getNeighborById(node.entry.id, 'next');
+      } else if (node?.kind === 'hotSpotEntry') {
+        target = manager.getNeighborByLocation(node.spot.uri, node.spot.line, 'next');
+      }
+      await navigateEntry(target);
     })
   );
 
