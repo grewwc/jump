@@ -45,13 +45,13 @@ export class HistoryManager {
   // ─── Persistence ──────────────────────────────────────────────────────────
 
   private load(): void {
-    const raw = this.context.globalState.get<JumpEntry[]>(STORAGE_KEY, []);
+    const raw = this.context.workspaceState.get<JumpEntry[]>(STORAGE_KEY, []);
     this.entries = raw;
     this.lastEntry = this.entries.length > 0 ? this.entries[0] : null;
   }
 
   private save(): void {
-    this.context.globalState.update(STORAGE_KEY, this.entries);
+    this.context.workspaceState.update(STORAGE_KEY, this.entries);
   }
 
   // ─── Config helpers ───────────────────────────────────────────────────────
