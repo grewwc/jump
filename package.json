@@ -1,0 +1,196 @@
+{
+  "name": "jump-history",
+  "displayName": "Jump History",
+  "description": "Track and revisit your navigation history across files",
+  "version": "0.1.0",
+  "publisher": "jump-history",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/local/jump-history"
+  },
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "jump-history",
+          "title": "Jump History",
+          "icon": "media/history.svg"
+        }
+      ]
+    },
+    "views": {
+      "jump-history": [
+        {
+          "id": "jumpHistoryTree",
+          "name": "Jump History",
+          "icon": "media/history.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "jumpHistory.clearHistory",
+        "title": "Clear History (Keep Pinned)",
+        "category": "Jump History",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "jumpHistory.clearAll",
+        "title": "Clear All History (Including Pinned)",
+        "category": "Jump History",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "jumpHistory.removeDeleted",
+        "title": "Remove Entries for Deleted Files",
+        "category": "Jump History",
+        "icon": "$(warning)"
+      },
+      {
+        "command": "jumpHistory.deleteEntry",
+        "title": "Delete Entry",
+        "category": "Jump History",
+        "icon": "$(close)"
+      },
+      {
+        "command": "jumpHistory.pinEntry",
+        "title": "Pin Entry",
+        "category": "Jump History",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "jumpHistory.unpinEntry",
+        "title": "Unpin Entry",
+        "category": "Jump History",
+        "icon": "$(pinned)"
+      },
+      {
+        "command": "jumpHistory.copyPath",
+        "title": "Copy File Path",
+        "category": "Jump History",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "jumpHistory.deleteFileGroup",
+        "title": "Remove All Entries for This File",
+        "category": "Jump History"
+      },
+      {
+        "command": "jumpHistory.toggleGroupByFile",
+        "title": "Toggle Group by File",
+        "category": "Jump History",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "jumpHistory.refresh",
+        "title": "Refresh",
+        "category": "Jump History",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "jumpHistory.toggleGroupByFile",
+          "when": "view == jumpHistoryTree",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jumpHistory.removeDeleted",
+          "when": "view == jumpHistoryTree",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jumpHistory.clearHistory",
+          "when": "view == jumpHistoryTree",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "jumpHistory.pinEntry",
+          "when": "view == jumpHistoryTree && viewItem == entry",
+          "group": "1_pin@1"
+        },
+        {
+          "command": "jumpHistory.unpinEntry",
+          "when": "view == jumpHistoryTree && viewItem == entryPinned",
+          "group": "1_pin@1"
+        },
+        {
+          "command": "jumpHistory.deleteEntry",
+          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted)",
+          "group": "2_modify@1"
+        },
+        {
+          "command": "jumpHistory.copyPath",
+          "when": "view == jumpHistoryTree && (viewItem == entry || viewItem == entryPinned || viewItem == entryDeleted)",
+          "group": "3_copy@1"
+        },
+        {
+          "command": "jumpHistory.deleteFileGroup",
+          "when": "view == jumpHistoryTree && viewItem == fileGroup",
+          "group": "2_modify@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Jump History",
+      "properties": {
+        "jumpHistory.maxEntries": {
+          "type": "number",
+          "default": 500,
+          "minimum": 10,
+          "maximum": 5000,
+          "description": "Maximum number of jump entries to keep in history"
+        },
+        "jumpHistory.lineJumpThreshold": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "Minimum line distance to count as a meaningful in-file jump"
+        },
+        "jumpHistory.groupByFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Group jump entries by file in the tree view"
+        },
+        "jumpHistory.showHotSpots": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a 'Hot Spots' section at the top of the tree with most-visited locations"
+        },
+        "jumpHistory.hotSpotsCount": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Maximum number of hot spots to display"
+        },
+        "jumpHistory.hotSpotsMinVisits": {
+          "type": "number",
+          "default": 2,
+          "minimum": 2,
+          "description": "Minimum number of visits for a location to be considered a hot spot"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.3.0"
+  }
+}
