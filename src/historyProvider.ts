@@ -4,7 +4,12 @@ import { HistoryManager, JumpEntry, HotSpot } from './historyManager';
 
 // ─── Node types ───────────────────────────────────────────────────────
 
-export type TreeNode = FileGroupNode | EntryNode | HotSpotsGroupNode | HotSpotEntryNode;
+export type TreeNode = PinnedGroupNode | FileGroupNode | EntryNode | HotSpotsGroupNode | HotSpotEntryNode;
+
+export class PinnedGroupNode {
+  readonly kind = 'pinnedGroup';
+  constructor(public readonly entries: JumpEntry[]) { }
+}
 
 export class HotSpotsGroupNode {
   readonly kind = 'hotSpotsGroup';
@@ -59,6 +64,9 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
   // ─── TreeDataProvider ──────────────────────────────────────────────────────
 
   getTreeItem(node: TreeNode): vscode.TreeItem {
+    if (node.kind === 'pinnedGroup') {
+      return this.makePinnedGroupItem(node);
+    }
     if (node.kind === 'hotSpotsGroup') {
       return this.makeHotSpotsGroupItem(node);
     }
@@ -74,6 +82,9 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
   getChildren(node?: TreeNode): TreeNode[] {
     if (!node) {
       return this.getRoots();
+    }
+    if (node.kind === 'pinnedGroup') {
+      return node.entries.map((e) => new EntryNode(e));
     }
     if (node.kind === 'hotSpotsGroup') {
       return node.spots.map((s) => new HotSpotEntryNode(s));
@@ -92,8 +103,17 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
     const showHotSpots = cfg.get<boolean>('showHotSpots', true);
     const hotSpotsCount = cfg.get<number>('hotSpotsCount', 5);
     const hotSpotsMinVisits = cfg.get<number>('hotSpotsMinVisits', 2);
+    const pinnedSortOrder = cfg.get<'addedAt' | 'alphabetical'>('pinnedSortOrder', 'addedAt');
 
     const roots: TreeNode[] = [];
+    const pinnedEntries = this.manager
+      .getAll()
+      .filter((entry) => entry.pinned && this.matchesEntry(entry))
+      .sort((a, b) => this.comparePinnedEntries(a, b, pinnedSortOrder));
+
+    if (pinnedEntries.length > 0) {
+      roots.push(new PinnedGroupNode(pinnedEntries));
+    }
 
     // Hot Spots always at the top
     if (showHotSpots) {
@@ -108,13 +128,13 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
     if (groupByFile) {
       const grouped = this.manager.getGroupedByFile();
       for (const [uri, entries] of grouped) {
-        const filtered = entries.filter((e) => this.matchesEntry(e));
+        const filtered = entries.filter((e) => !e.pinned && this.matchesEntry(e));
         if (filtered.length > 0) {
           roots.push(new FileGroupNode(uri, filtered));
         }
       }
     } else {
-      for (const e of this.manager.getFlat().filter((entry) => this.matchesEntry(entry))) {
+      for (const e of this.manager.getFlat().filter((entry) => !entry.pinned && this.matchesEntry(entry))) {
         roots.push(new EntryNode(e));
       }
     }
@@ -138,6 +158,36 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
     const displayName = HistoryManager.displayName(h.uri);
     const haystack = `${displayName} ${h.line + 1} ${h.lineText} ${h.count}`.toLowerCase();
     return haystack.includes(this.searchQuery);
+  }
+
+  private comparePinnedEntries(
+    a: JumpEntry,
+    b: JumpEntry,
+    sortOrder: 'addedAt' | 'alphabetical'
+  ): number {
+    if (sortOrder === 'alphabetical') {
+      const aName = `${HistoryManager.displayName(a.uri)}:${a.line + 1}`.toLowerCase();
+      const bName = `${HistoryManager.displayName(b.uri)}:${b.line + 1}`.toLowerCase();
+      return aName.localeCompare(bName) || b.timestamp - a.timestamp;
+    }
+    return b.timestamp - a.timestamp;
+  }
+
+  private makePinnedGroupItem(node: PinnedGroupNode): vscode.TreeItem {
+    const sortOrder = vscode.workspace
+      .getConfiguration('jumpHistory')
+      .get<'addedAt' | 'alphabetical'>('pinnedSortOrder', 'addedAt');
+    const item = new vscode.TreeItem(
+      'Pinned',
+      vscode.TreeItemCollapsibleState.Expanded
+    );
+    item.description = `${node.entries.length} · ${sortOrder === 'addedAt' ? 'time' : 'A-Z'}`;
+    item.tooltip = new vscode.MarkdownString(
+      `**Pinned** — your saved jump locations for quick access.\n\nSorted by: **${sortOrder === 'addedAt' ? 'added time' : 'alphabetical'}**`
+    );
+    item.iconPath = new vscode.ThemeIcon('pinned', new vscode.ThemeColor('charts.yellow'));
+    item.contextValue = 'pinnedGroup';
+    return item;
   }
 
   // ─── Hot Spots items ────────────────────────────────────────────────────
@@ -206,14 +256,12 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
       vscode.TreeItemCollapsibleState.Collapsed
     );
 
-    const pinnedCount = node.entries.filter((e) => e.pinned).length;
     const deletedCount = node.entries.filter((e) => e.deleted).length;
     const total = node.entries.length;
 
     const parts: string[] = [];
     if (dir !== '.') { parts.push(dir); }
     parts.push(`${total} jump${total !== 1 ? 's' : ''}`);
-    if (pinnedCount > 0) { parts.push(`${pinnedCount} pinned`); }
     item.description = parts.join(' · ');
 
     item.tooltip = new vscode.MarkdownString(

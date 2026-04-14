@@ -454,6 +454,36 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.changePinnedSort', async () => {
+      const cfg = vscode.workspace.getConfiguration('jumpHistory');
+      const current = cfg.get<'addedAt' | 'alphabetical'>('pinnedSortOrder', 'addedAt');
+      const picked = await vscode.window.showQuickPick(
+        [
+          {
+            label: 'Sort By Added Time',
+            description: 'Newest pinned items first',
+            value: 'addedAt' as const,
+          },
+          {
+            label: 'Sort Alphabetically',
+            description: 'By file/path and line number',
+            value: 'alphabetical' as const,
+          },
+        ],
+        {
+          title: 'Pinned Sort Order',
+          placeHolder: current === 'addedAt' ? 'Current: Added Time' : 'Current: Alphabetical',
+        }
+      );
+      if (!picked) {
+        return;
+      }
+      await cfg.update('pinnedSortOrder', picked.value, vscode.ConfigurationTarget.Workspace);
+      realProvider.refresh();
+    })
+  );
+
   // ─── Config change watcher ─────────────────────────────────────────────────
 
   context.subscriptions.push(
