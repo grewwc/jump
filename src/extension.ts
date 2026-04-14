@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { HistoryManager, JumpEntry } from './historyManager';
 import { NavHistoryProvider, EntryNode, FileGroupNode, HotSpotEntryNode, TreeNode } from './historyProvider';
+import { ChatViewProvider } from './chatPanel';
 
 export function activate(context: vscode.ExtensionContext): void {
   // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -498,6 +499,53 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Register the treeView itself for disposal
   context.subscriptions.push(treeView);
+
+  // ─── AI Chat Panel ─────────────────────────────────────────────────────────
+
+  const chatProvider = new ChatViewProvider(context.extensionUri, context.workspaceState);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatProvider)
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.newChat', () => {
+      chatProvider.newSession();
+    })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.switchChatSession', async () => {
+      await chatProvider.switchSessionQuickPick();
+    })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.renameChatSession', async () => {
+      await chatProvider.renameCurrentSession();
+    })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.deleteChatSession', async () => {
+      await chatProvider.deleteCurrentSession();
+    })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.chatAddFile', () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && editor.document.uri.scheme === 'file') {
+        chatProvider.addFileByPath(editor.document.uri.fsPath);
+      }
+    })
+  );
+
+  // Track editor selection changes for chat context
+  context.subscriptions.push(
+    vscode.window.onDidChangeTextEditorSelection(() => {
+      chatProvider.updateSelection(vscode.window.activeTextEditor);
+    })
+  );
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      chatProvider.updateSelection(editor);
+    })
+  );
 }
 
 export function deactivate(): void {

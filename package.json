@@ -27,9 +27,16 @@
     "views": {
       "jump-history": [
         {
+          "id": "jumpHistoryChat",
+          "name": "AI Chat",
+          "type": "webview",
+          "visibility": "visible"
+        },
+        {
           "id": "jumpHistoryTree",
           "name": "Jump History",
-          "icon": "media/history.svg"
+          "icon": "media/history.svg",
+          "visibility": "collapsed"
         }
       ]
     },
@@ -128,6 +135,36 @@
         "title": "Change Pinned Sort",
         "category": "Jump History",
         "icon": "$(sort-precedence)"
+      },
+      {
+        "command": "jumpHistory.newChat",
+        "title": "New Chat Session",
+        "category": "Jump History",
+        "icon": "$(add)"
+      },
+      {
+        "command": "jumpHistory.chatAddFile",
+        "title": "Add Current File to Chat",
+        "category": "Jump History",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "jumpHistory.switchChatSession",
+        "title": "Switch Chat Session",
+        "category": "Jump History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "jumpHistory.renameChatSession",
+        "title": "Rename Chat Session",
+        "category": "Jump History",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "jumpHistory.deleteChatSession",
+        "title": "Delete Chat Session",
+        "category": "Jump History",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -160,6 +197,26 @@
         {
           "command": "jumpHistory.clearHistory",
           "when": "view == jumpHistoryTree",
+          "group": "navigation@3"
+        },
+        {
+          "command": "jumpHistory.switchChatSession",
+          "when": "view == jumpHistoryChat",
+          "group": "navigation@0"
+        },
+        {
+          "command": "jumpHistory.newChat",
+          "when": "view == jumpHistoryChat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jumpHistory.renameChatSession",
+          "when": "view == jumpHistoryChat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jumpHistory.deleteChatSession",
+          "when": "view == jumpHistoryChat",
           "group": "navigation@3"
         }
       ],
@@ -263,6 +320,11 @@
           "default": 2,
           "minimum": 2,
           "description": "Minimum number of visits for a location to be considered a hot spot"
+        },
+        "jumpHistory.agentBinaryPath": {
+          "type": "string",
+          "default": "a",
+          "description": "Path to the AI agent binary (e.g. 'a' or '/path/to/a')"
         }
       }
     }
