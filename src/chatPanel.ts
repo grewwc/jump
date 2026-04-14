@@ -806,7 +806,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="context-area" id="contextArea"></div>
   <div class="input-area">
     <div class="input-wrapper">
-      <textarea id="input" rows="3" placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"></textarea>
+      <textarea id="input" rows="3" placeholder="Ask a question... (Enter for newline, Cmd+Enter or Shift+Enter to send)"></textarea>
       <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
     </div>
     <button class="stop-btn" id="stopBtn">Stop</button>
@@ -960,7 +960,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   });
 
   inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && (e.metaKey || e.shiftKey)) {
       e.preventDefault();
       sendMessage();
     }
