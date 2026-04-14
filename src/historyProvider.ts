@@ -252,20 +252,18 @@ export class NavHistoryProvider implements vscode.TreeDataProvider<TreeNode> {
     const ext = path.extname(basename).slice(1);
 
     const item = new vscode.TreeItem(
-      basename,
+      displayName,
       vscode.TreeItemCollapsibleState.Collapsed
     );
 
     const deletedCount = node.entries.filter((e) => e.deleted).length;
     const total = node.entries.length;
 
-    const parts: string[] = [];
-    if (dir !== '.') { parts.push(dir); }
-    parts.push(`${total} jump${total !== 1 ? 's' : ''}`);
-    item.description = parts.join(' · ');
+    const itemDescription = `${total} jump${total !== 1 ? 's' : ''}`;
+    item.description = itemDescription;
 
     item.tooltip = new vscode.MarkdownString(
-      `**${displayName}**\n\n${parts.slice(dir !== '.' ? 1 : 0).join(' · ')}${deletedCount > 0 ? `\n\n⚠️ File deleted` : ''}`
+      `**${displayName}**\n\n${itemDescription}${deletedCount > 0 ? `\n\n⚠️ File deleted` : ''}`
     );
     item.iconPath = deletedCount > 0
       ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'))

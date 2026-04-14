@@ -165,6 +165,11 @@
         "title": "Delete Chat Session",
         "category": "Jump History",
         "icon": "$(trash)"
+      },
+      {
+        "command": "jumpHistory.chatSendMessage",
+        "title": "Send Chat Message",
+        "category": "Jump History"
       }
     ],
     "menus": {
@@ -259,6 +264,21 @@
       ]
     },
     "keybindings": [
+      {
+        "command": "jumpHistory.chatSendMessage",
+        "key": "cmd+enter",
+        "when": "jumpHistory.chatInputFocused"
+      },
+      {
+        "command": "jumpHistory.chatSendMessage",
+        "key": "shift+enter",
+        "when": "jumpHistory.chatInputFocused"
+      },
+      {
+        "command": "jumpHistory.chatSendMessage",
+        "key": "ctrl+enter",
+        "when": "jumpHistory.chatInputFocused"
+      },
       {
         "command": "jumpHistory.deleteSelected",
         "key": "delete",

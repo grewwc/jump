@@ -527,6 +527,11 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
   context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.chatSendMessage', async () => {
+      await chatProvider.triggerSend();
+    })
+  );
+  context.subscriptions.push(
     vscode.commands.registerCommand('jumpHistory.chatAddFile', () => {
       const editor = vscode.window.activeTextEditor;
       if (editor && editor.document.uri.scheme === 'file') {
@@ -546,8 +551,6 @@ export function activate(context: vscode.ExtensionContext): void {
       chatProvider.updateSelection(editor);
     })
   );
-}
 
-export function deactivate(): void {
   // Nothing to clean up; subscriptions handle it
 }

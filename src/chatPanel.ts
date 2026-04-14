@@ -2,10 +2,10 @@ import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
 
-/** Strip ANSI escape codes from a string */
+/** Strip ANSI escape codes and carriage returns from a string */
 function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\[[0-9;]*m/g, '');
+  return text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
 }
 
 interface ChatMessage {
@@ -230,8 +230,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'addFile':
           await this.pickAndAttachFiles();
           break;
+        case 'inputFocus':
+          await vscode.commands.executeCommand('setContext', 'jumpHistory.chatInputFocused', true);
+          break;
+        case 'inputBlur':
+          await vscode.commands.executeCommand('setContext', 'jumpHistory.chatInputFocused', false);
+          break;
+        case 'openFile':
+          await this.openFileAtLine(data.filePath, data.line);
+          break;
       }
     });
+  }
+
+  public triggerSend(): void {
+    this.view?.webview.postMessage({ type: 'triggerSend' });
   }
 
   public newSession(): void {
@@ -327,8 +340,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private stopCurrentProcess(): void {
     if (this.currentProcess) {
-      this.currentProcess.kill('SIGTERM');
-      this.currentProcess = null;
+      // Ctrl+C semantics for agent cancellation.
+      this.currentProcess.kill('SIGINT');
+    }
+  }
+
+  private async openFileAtLine(filePath: string, line?: number): Promise<void> {
+    const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+    const absPath = path.isAbsolute(filePath) ? filePath : path.join(wsFolder, filePath);
+    try {
+      const uri = vscode.Uri.file(absPath);
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const lineNum = line ? Math.max(0, line - 1) : 0;
+      const range = new vscode.Range(lineNum, 0, lineNum, 0);
+      await vscode.window.showTextDocument(doc, { selection: range, preview: true });
+    } catch {
+      vscode.window.showErrorMessage(`Cannot open file: ${filePath}`);
     }
   }
 
@@ -357,7 +384,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
 
-    const args = ['--session', this.sessionId, '--short-output'];
+    const args = ['--session', this.sessionId];
 
     // Attach files via --files flag
     const allFiles = [...this.attachedFiles];
@@ -391,46 +418,196 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       let fullOutput = '';
       let headerDone = false;
+      let insideThinking = false;
+      let stdoutBuffer = '';
+
+      const postStatus = (label: string) => {
+        this.view?.webview.postMessage({ type: 'statusFlag', label });
+      };
+
+      const emitAssistantText = (textChunk: string) => {
+        if (!textChunk) {
+          return;
+        }
+        fullOutput += textChunk;
+        this.view?.webview.postMessage({ type: 'streamChunk', text: textChunk });
+      };
+
+      const handleProtocolPayload = (payload: unknown): boolean => {
+        if (Array.isArray(payload)) {
+          let handled = false;
+          for (const item of payload) {
+            if (!item || typeof item !== 'object') {
+              continue;
+            }
+            const record = item as {
+              action?: string;
+              step_append_info?: { token?: string; append_field?: string };
+            };
+            if (record.action === 'step_append') {
+              const token = record.step_append_info?.token;
+              if (typeof token === 'string' && token.length > 0) {
+                emitAssistantText(token);
+                handled = true;
+              }
+            }
+          }
+          return handled;
+        }
+
+        if (!payload || typeof payload !== 'object') {
+          return false;
+        }
+
+        const record = payload as { final_report?: unknown; plan_status?: unknown };
+        if (typeof record.final_report === 'string' && record.final_report.length > 0) {
+          emitAssistantText(record.final_report);
+          return true;
+        }
+        return typeof record.plan_status !== 'undefined';
+      };
+
+      const tryHandleProtocolLine = (line: string): boolean => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return false;
+        }
+        if (/^data:\s*\[DONE\]/i.test(trimmed)) {
+          return true;
+        }
+
+        const payloadText = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+        if (!payloadText) {
+          return false;
+        }
+        if (!(payloadText.startsWith('{') || payloadText.startsWith('['))) {
+          return false;
+        }
+
+        try {
+          return handleProtocolPayload(JSON.parse(payloadText));
+        } catch {
+          return false;
+        }
+      };
+
+      const processLine = (rawLine: string) => {
+        let line = rawLine;
+
+        // Skip header lines (mcp info, model info, assistant info)
+        if (!headerDone) {
+          if (line.match(/^╭─\s*(mcp|assistant)/) || line.match(/^\[.*\(search:/) || line.trim() === '') {
+            return;
+          }
+          // Thinking markers
+          if (line.match(/╭─\s*thinking/)) {
+            insideThinking = true;
+            this.view?.webview.postMessage({ type: 'thinkingStart' });
+            return;
+          }
+          if (line.match(/╰─\s*done thinking/)) {
+            insideThinking = false;
+            this.view?.webview.postMessage({ type: 'thinkingEnd' });
+            headerDone = true;
+            return;
+          }
+          // While inside a thinking block, skip all content
+          if (insideThinking) {
+            return;
+          }
+          // Tool call start — let it fall through to tool processing below
+          if (line.match(/^╭─\s*(?:tool|call_tools?|call_tools)\s*·?\s*(.*)$/i)) {
+            headerDone = true;
+            // fall through
+          } else {
+            // If the line has actual content (not a known header), start emitting
+            const stripped = line.replace(/^\s*[│|]\s?/, '').trim();
+            if (stripped.length > 0) {
+              headerDone = true;
+              // fall through to content processing
+            } else {
+              return;
+            }
+          }
+        }
+
+        // Tool call markers
+        const toolMatch = line.match(/^╭─\s*(?:tool|call_tools?|call_tools)\s*·?\s*(.*)$/i);
+        if (toolMatch) {
+          let name = toolMatch[1].trim();
+          if (/^(calls?)$/i.test(name)) {
+            name = 'call_tools';
+          }
+          if (!name) {
+            name = 'call_tools';
+          }
+          this.view?.webview.postMessage({ type: 'toolStart', name });
+          // Add a code block start to neatly display the tool call content
+          const codeBlockStart = '```\n';
+          fullOutput += codeBlockStart;
+          this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockStart });
+          return;
+        }
+        if (line.match(/^╰─\s*tool/)) {
+          this.view?.webview.postMessage({ type: 'toolEnd' });
+          // Add a code block end
+          const codeBlockEnd = '\n```\n';
+          fullOutput += codeBlockEnd;
+          this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockEnd });
+          return;
+        }
+        // Normalize and emit status flags as badges instead of mixing into assistant text
+        const trimmed = line.trim();
+        if (/^[│|]\s*result\s*:/i.test(trimmed)) {
+          postStatus(trimmed.replace(/^[│|]\s*/u, ''));
+          return;
+        }
+        if (/^\[(Completed|Running|Failed)\]/i.test(trimmed)) {
+          postStatus(trimmed);
+          return;
+        }
+        if (/^\[[^\]]+\(search:\s*(true|false)\)\]$/i.test(trimmed)) {
+          postStatus(trimmed);
+          return;
+        }
+        // Ignore the 'output: streaming command output' prefix and 'is asking the same question again' log that Minimax might emit directly
+        if (/^[│|]\s*output: streaming command output/i.test(trimmed)) {
+          return;
+        }
+        // If the model outputs the "done thinking" marker in the middle of text chunks, hide it
+        if (line.match(/╰─\s*done thinking/)) {
+          this.view?.webview.postMessage({ type: 'thinkingEnd' });
+          return;
+        }
+
+        // Skip more header/status lines after thinking
+        if (line.match(/^╭─/) || line.match(/^╰─/)) {
+          return;
+        }
+
+        if (tryHandleProtocolLine(line)) {
+          return;
+        }
+        // Skip output: prefixed tool result lines (they're shown as status badges)
+        if (/^[│|]?\s*output:\s/i.test(trimmed)) {
+          return;
+        }
+
+        // Actual content – strip leading box-drawing bars (may have leading whitespace)
+        line = line.replace(/^\s*[│|]\s?/, '');
+        emitAssistantText(line + '\n');
+      };
 
       const processChunk = (raw: string) => {
         const clean = stripAnsi(raw);
-        const lines = clean.split('\n');
+        stdoutBuffer += clean;
 
-        for (const line of lines) {
-          // Skip header lines (mcp info, model info, assistant info)
-          if (!headerDone) {
-            if (line.match(/^╭─\s*(mcp|assistant)/) || line.match(/^\[.*\(search:/) || line.trim() === '') {
-              continue;
-            }
-            // Thinking markers
-            if (line.match(/╭─\s*thinking/)) {
-              this.view?.webview.postMessage({ type: 'thinkingStart' });
-              continue;
-            }
-            if (line.match(/╰─\s*done thinking/)) {
-              this.view?.webview.postMessage({ type: 'thinkingEnd' });
-              headerDone = true;
-              continue;
-            }
-          }
-
-          // Tool call markers
-          if (line.match(/^╭─\s*tool/)) {
-            this.view?.webview.postMessage({ type: 'toolStart', name: line.replace(/^╭─\s*tool\s*·?\s*/, '').trim() });
-            continue;
-          }
-          if (line.match(/^╰─\s*tool/)) {
-            this.view?.webview.postMessage({ type: 'toolEnd' });
-            continue;
-          }
-          // Skip more header/status lines after thinking
-          if (line.match(/^╭─/) || line.match(/^╰─/)) {
-            continue;
-          }
-
-          // Actual content
-          fullOutput += line + '\n';
-          this.view?.webview.postMessage({ type: 'streamChunk', text: line + '\n' });
+        let newlineIndex = stdoutBuffer.indexOf('\n');
+        while (newlineIndex !== -1) {
+          const line = stdoutBuffer.slice(0, newlineIndex);
+          stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+          processLine(line);
+          newlineIndex = stdoutBuffer.indexOf('\n');
         }
       };
 
@@ -439,15 +616,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
 
       child.stderr?.on('data', (data: Buffer) => {
-        // Some info goes to stderr; mostly ignore but log errors
+        // Surface stderr text so launch/runtime failures are visible in panel.
         const text = data.toString();
-        if (text.includes('Error') || text.includes('error')) {
-          this.view?.webview.postMessage({ type: 'streamChunk', text: stripAnsi(text) });
+        const clean = stripAnsi(text);
+        if (clean.trim().length > 0) {
+          this.view?.webview.postMessage({ type: 'streamChunk', text: clean });
         }
       });
 
       child.on('close', () => {
         this.currentProcess = null;
+        if (stdoutBuffer.trim().length > 0) {
+          processLine(stdoutBuffer);
+          stdoutBuffer = '';
+        }
         const content = fullOutput.trim();
         if (content) {
           const current = this.getCurrentSession();
@@ -537,6 +719,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     opacity: 0.6;
   }
   .header-actions button:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
+  #cancelBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--vscode-errorForeground);
+    border: 1px solid var(--vscode-inputValidation-errorBorder, transparent);
+    padding: 0 5px;
+    line-height: 18px;
+    min-width: 18px;
+    height: 20px;
+    font-size: 12px;
+    opacity: 0.35;
+  }
+  #cancelBtn:disabled {
+    cursor: default;
+    opacity: 0.25;
+    color: var(--vscode-disabledForeground);
+    border-color: transparent;
+    background: transparent;
+  }
+  #cancelBtn.active {
+    opacity: 0.95;
+    background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground, transparent) 60%, transparent);
+  }
 
   /* Messages */
   .messages {
@@ -572,8 +778,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   .message.assistant {
     padding: 4px 0;
-    white-space: pre-wrap;
+  }
+  .assistant-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 6px;
+    margin-bottom: 8px;
+    align-items: center;
+  }
+  .assistant-content {
     word-break: break-word;
+  }
+  .assistant-content p {
+    margin: 4px 0;
+  }
+  .assistant-content p:first-child {
+    margin-top: 0;
   }
   .message.error {
     color: var(--vscode-errorForeground);
@@ -610,8 +830,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     background: var(--vscode-badge-background);
     color: var(--vscode-badge-foreground);
     border-radius: 4px;
-    display: inline-block;
-    margin: 2px 0;
+    display: inline-flex;
+    align-items: center;
+    margin: 1px 0;
+  }
+  .status-indicator {
+    font-size: 11px;
+    opacity: 0.75;
+    padding: 3px 8px;
+    background: var(--vscode-editorInfo-background, var(--vscode-badge-background));
+    color: var(--vscode-editorInfo-foreground, var(--vscode-badge-foreground));
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    margin: 1px 0;
   }
 
   /* Markdown rendering */
@@ -670,6 +902,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   .message.assistant a { color: var(--vscode-textLink-foreground); }
   .message.assistant a:hover { color: var(--vscode-textLink-activeForeground); }
+  .message.assistant .file-link {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    cursor: pointer;
+  }
 
   /* Input area */
   .input-area {
@@ -702,20 +939,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   textarea:focus { border-color: var(--vscode-focusBorder); }
   textarea::placeholder { color: var(--vscode-input-placeholderForeground); }
-
-  .stop-btn {
-    border: none;
-    border-radius: 6px;
-    padding: 8px 14px;
-    cursor: pointer;
-    font-size: 13px;
-    flex-shrink: 0;
-    height: 36px;
-    background: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
-    display: none;
-  }
-  .stop-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
 
   /* Context chips */
   .context-area {
@@ -791,6 +1014,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span class="session-title" id="sessionTitle">New Chat</span>
     </div>
     <div class="header-actions">
+      <button id="cancelBtn" title="Stop Current Response (Ctrl+C)" disabled>■</button>
       <button id="switchSessionBtn" title="Switch Session">☰</button>
       <button id="renameSessionBtn" title="Rename Session">✎</button>
       <button id="deleteSessionBtn" title="Delete Session">🗑</button>
@@ -809,7 +1033,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <textarea id="input" rows="3" placeholder="Ask a question... (Enter for newline, Cmd+Enter or Shift+Enter to send)"></textarea>
       <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
     </div>
-    <button class="stop-btn" id="stopBtn">Stop</button>
   </div>
 
 <script nonce="${nonce}">
@@ -817,7 +1040,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const messagesEl = document.getElementById('messages');
   const welcomeEl = document.getElementById('welcome');
   const inputEl = document.getElementById('input');
-  const stopBtn = document.getElementById('stopBtn');
+  const cancelBtn = document.getElementById('cancelBtn');
   const newChatBtn = document.getElementById('newChatBtn');
   const switchSessionBtn = document.getElementById('switchSessionBtn');
   const renameSessionBtn = document.getElementById('renameSessionBtn');
@@ -828,36 +1051,84 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   let isStreaming = false;
   let currentAssistantEl = null;
+  let currentAssistantMetaEl = null;
+  let currentAssistantContentEl = null;
   let currentAssistantRaw = '';
   let currentSelection = null;
   let attachedFiles = [];
 
+  // ── Input history (persisted across reload) ──
+  const prevState = vscode.getState() || {};
+  let inputHistory = prevState.inputHistory || [];
+  let historyIndex = -1;
+  let savedInput = '';
+
+  function persistHistory() {
+    vscode.setState(Object.assign({}, vscode.getState() || {}, { inputHistory: inputHistory.slice(0, 100) }));
+  }
+
   // ── Simple Markdown → HTML ──
+  function escapeHtml(text) {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   function renderMarkdown(text) {
-    // Code blocks
-    text = text.replace(/\`\`\`(\\w*)?\\n([\\s\\S]*?)\`\`\`/g, (_, lang, code) => {
-      const escaped = escapeHtml(code.trimEnd());
-      return '<pre><code class="lang-' + (lang || '') + '">' + escaped + '</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>';
+    // Escape HTML entities first to prevent injection
+    text = escapeHtml(text);
+
+    // 1. Extract code blocks into placeholders so newline handling won't corrupt them
+    var codeBlocks = [];
+    text = text.replace(/\`\`\`([^\\r\\n]*)\\r?\\n([\\s\\S]*?)\`\`\`/g, function(_, lang, code) {
+      var idx = codeBlocks.length;
+      codeBlocks.push('<pre><code class="lang-' + escapeHtml((lang || '').trim()) + '">' + code.trimEnd() + '</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>');
+      return '\\x00CB' + idx + '\\x00';
     });
-    // Inline code
+
+    // 2. Inline code
     text = text.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
     // Bold
     text = text.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
     // Italic
     text = text.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
     // Headers
-    text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-    text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-    text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-    // Links
+    text = text.replace(/^### (.+)$/gm, '</p><h3>$1</h3><p>');
+    text = text.replace(/^## (.+)$/gm, '</p><h2>$1</h2><p>');
+    text = text.replace(/^# (.+)$/gm, '</p><h1>$1</h1><p>');
+    // Links [text](url)
     text = text.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" target="_blank">$1</a>');
-    // Blockquotes
-    text = text.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+    // Blockquotes (&gt; after HTML escaping)
+    text = text.replace(/^&gt; (.+)$/gm, '</p><blockquote>$1</blockquote><p>');
+    // Unordered list items
+    text = text.replace(/^- (.+)$/gm, '<li>$1</li>');
+    // Paragraph breaks: double newlines
+    text = text.replace(/\\n{2,}/g, '</p><p>');
+    // Single newlines to <br>
+    text = text.replace(/\\n/g, '<br>');
+    // Wrap in paragraph tags and clean up empties
+    text = '<p>' + text + '</p>';
+    text = text.replace(/<p>[\\s]*<\\/p>/g, '');
+
+    // 3. Re-insert code blocks
+    text = text.replace(/\\x00CB(\\d+)\\x00/g, function(_, idx) {
+      return codeBlocks[parseInt(idx, 10)] || '';
+    });
     return text;
   }
 
-  function escapeHtml(text) {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  function linkifyPaths(html) {
+    var insideCode = false;
+    return html.replace(/((?:<[^>]+>)|(?:[^<]+))/g, function(segment) {
+      if (segment.startsWith('<')) {
+        if (/<code/i.test(segment) || /<pre/i.test(segment)) insideCode = true;
+        if (/<\\/code/i.test(segment) || /<\\/pre/i.test(segment)) insideCode = false;
+        return segment;
+      }
+      if (insideCode) return segment;
+      return segment.replace(/(\\/?)([a-zA-Z0-9_.\\-]+\\/(?:[a-zA-Z0-9_.\\-]+\\/)*[a-zA-Z0-9_.\\-]+\\.[a-zA-Z0-9]+)(?::(\\d+)(?:-(\\d+))?)?/g, function(m, slash, fp, ln) {
+        var fullPath = slash + fp;
+        return '<a class="file-link" href="#" data-path="' + fullPath + '" data-line="' + (ln || '') + '">' + m + '</a>';
+      });
+    });
   }
 
   function copyCode(btn) {
@@ -887,16 +1158,52 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   function startAssistantMessage() {
     const el = document.createElement('div');
     el.className = 'message assistant';
+
+    const metaEl = document.createElement('div');
+    metaEl.className = 'assistant-meta';
+    el.appendChild(metaEl);
+
+    const contentEl = document.createElement('div');
+    contentEl.className = 'assistant-content';
+    el.appendChild(contentEl);
+
     messagesEl.appendChild(el);
     currentAssistantEl = el;
+    currentAssistantMetaEl = metaEl;
+    currentAssistantContentEl = contentEl;
     currentAssistantRaw = '';
+    scrollToBottom();
+  }
+
+  // Throttled rendering: accumulate text, render at most once per animation frame
+  let renderPending = false;
+
+  function flushAssistantRender() {
+    if (!currentAssistantContentEl) {
+      return;
+    }
+    currentAssistantContentEl.innerHTML = linkifyPaths(renderMarkdown(currentAssistantRaw));
     scrollToBottom();
   }
 
   function appendToAssistant(text) {
     if (!currentAssistantEl) startAssistantMessage();
     currentAssistantRaw += text;
-    currentAssistantEl.innerHTML = renderMarkdown(escapeForRender(currentAssistantRaw));
+    if (!renderPending) {
+      renderPending = true;
+      requestAnimationFrame(function() {
+        renderPending = false;
+        flushAssistantRender();
+      });
+    }
+  }
+
+  function appendAssistantFlag(className, text) {
+    if (!currentAssistantEl) startAssistantMessage();
+    const el = document.createElement('div');
+    el.className = className;
+    el.textContent = text;
+    currentAssistantMetaEl.appendChild(el);
     scrollToBottom();
   }
 
@@ -908,7 +1215,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   function setStreaming(val) {
     isStreaming = val;
-    stopBtn.style.display = val ? '' : 'none';
+    cancelBtn.disabled = !val;
+    cancelBtn.classList.toggle('active', val);
     inputEl.disabled = val;
     addFileBtn.disabled = val;
     if (!val) inputEl.focus();
@@ -917,6 +1225,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   function sendMessage() {
     const text = inputEl.value.trim();
     if (!text || isStreaming) return;
+    inputHistory.unshift(text);
+    historyIndex = -1;
+    savedInput = '';
+    persistHistory();
     addUserMessage(text);
     vscode.postMessage({ type: 'sendMessage', text });
     inputEl.value = '';
@@ -925,7 +1237,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   // ── Event handlers ──
-  stopBtn.addEventListener('click', () => {
+  cancelBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'stop' });
   });
   newChatBtn.addEventListener('click', () => {
@@ -936,6 +1248,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       welcomeEl.style.display = '';
     }
     currentAssistantEl = null;
+    currentAssistantMetaEl = null;
+    currentAssistantContentEl = null;
     currentAssistantRaw = '';
     currentSelection = null;
     attachedFiles = [];
@@ -960,10 +1274,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   });
 
   inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.shiftKey)) {
+    if (e.key === 'Enter' && (e.metaKey || e.shiftKey || e.ctrlKey)) {
       e.preventDefault();
       sendMessage();
     }
+    // Navigate input history with up/down arrows
+    if (e.key === 'ArrowUp' && inputEl.selectionStart === 0 && inputEl.selectionEnd === 0) {
+      if (inputHistory.length > 0 && historyIndex < inputHistory.length - 1) {
+        if (historyIndex === -1) savedInput = inputEl.value;
+        historyIndex++;
+        inputEl.value = inputHistory[historyIndex];
+        e.preventDefault();
+      }
+    }
+    if (e.key === 'ArrowDown' && historyIndex >= 0) {
+      if (inputEl.selectionStart === inputEl.value.length) {
+        historyIndex--;
+        inputEl.value = historyIndex === -1 ? savedInput : inputHistory[historyIndex];
+        e.preventDefault();
+      }
+    }
+  });
+
+  inputEl.addEventListener('focus', () => {
+    vscode.postMessage({ type: 'inputFocus' });
+  });
+  inputEl.addEventListener('blur', () => {
+    vscode.postMessage({ type: 'inputBlur' });
   });
 
   // Auto-resize textarea
@@ -1013,12 +1350,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   });
 
+  // ── File path click handler ──
+  messagesEl.addEventListener('click', (e) => {
+    const link = e.target.closest('.file-link');
+    if (!link) return;
+    e.preventDefault();
+    const fp = link.dataset.path;
+    const ln = link.dataset.line ? parseInt(link.dataset.line, 10) : undefined;
+    vscode.postMessage({ type: 'openFile', filePath: fp, line: ln });
+  });
+
   function renderLoadedSession(session) {
     messagesEl.innerHTML = '';
     if (sessionTitleEl) {
       sessionTitleEl.textContent = session?.title || 'New Chat';
     }
     currentAssistantEl = null;
+    currentAssistantMetaEl = null;
+    currentAssistantContentEl = null;
     currentAssistantRaw = '';
 
     const history = Array.isArray(session?.messages) ? session.messages : [];
@@ -1036,7 +1385,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else {
         const el = document.createElement('div');
         el.className = 'message assistant';
-        el.innerHTML = renderMarkdown(escapeForRender(msg.content || ''));
+        const contentEl = document.createElement('div');
+        contentEl.className = 'assistant-content';
+        contentEl.innerHTML = linkifyPaths(renderMarkdown(msg.content || ''));
+        el.appendChild(contentEl);
         messagesEl.appendChild(el);
       }
     }
@@ -1068,20 +1420,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       }
       case 'toolStart': {
-        const el = document.createElement('div');
-        el.className = 'tool-indicator';
-        el.textContent = '🔧 ' + (data.name || 'tool');
-        messagesEl.appendChild(el);
-        scrollToBottom();
+        const normalized = /^(calls?)$/i.test(data.name || '') ? 'call_tools' : (data.name || 'call_tools');
+        const name = normalized !== 'call_tools' ? 'call_tools(' + normalized + ')' : 'call_tools';
+        appendAssistantFlag('tool-indicator', '🔧 ' + name);
         break;
       }
       case 'toolEnd':
         break;
+      case 'statusFlag': {
+        appendAssistantFlag('status-indicator', '• ' + (data.label || 'status'));
+        break;
+      }
       case 'streamChunk':
         appendToAssistant(data.text);
         break;
       case 'endResponse':
+        renderPending = false;
+        flushAssistantRender();
         currentAssistantEl = null;
+        currentAssistantMetaEl = null;
+        currentAssistantContentEl = null;
         currentAssistantRaw = '';
         setStreaming(false);
         break;
@@ -1100,6 +1458,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           welcomeEl.style.display = '';
         }
         currentAssistantEl = null;
+        currentAssistantMetaEl = null;
+        currentAssistantContentEl = null;
         currentAssistantRaw = '';
         currentSelection = null;
         attachedFiles = [];
@@ -1113,6 +1473,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'filesUpdate':
         attachedFiles = data.files || [];
         renderContextChips();
+        break;
+      case 'triggerSend':
+        sendMessage();
         break;
     }
   });
