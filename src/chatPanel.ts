@@ -1343,6 +1343,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let currentSelection = null;
   let attachedFiles = [];
   let mermaidInitialized = false;
+  let isImeComposing = false;
+  let lastImeEndTime = 0;
+
+  inputEl.addEventListener('compositionstart', () => {
+    isImeComposing = true;
+  });
+  inputEl.addEventListener('compositionend', () => {
+    isImeComposing = false;
+    lastImeEndTime = Date.now();
+  });
 
   // ── Input history (persisted across reload) ──
   const prevState = vscode.getState() || {};
@@ -1757,6 +1767,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   });
 
   inputEl.addEventListener('keydown', (e) => {
+    // Prevent Enter from sending when using an IME (Input Method Editor)
+    // In many browsers, pressing Enter to select IME candidates fires keydown with keyCode 229
+    // or fires Enter but during composition.
+    if (e.isComposing || isImeComposing || e.keyCode === 229) {
+      return;
+    }
+    
+    // Check if the time since the last compositionend is very short
+    if (e.key === 'Enter' && (Date.now() - lastImeEndTime < 200)) {
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();

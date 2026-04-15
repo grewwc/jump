@@ -269,11 +269,6 @@
     },
     "keybindings": [
       {
-        "command": "jumpHistory.chatSendMessage",
-        "key": "enter",
-        "when": "jumpHistory.chatInputFocused"
-      },
-      {
         "command": "jumpHistory.deleteSelected",
         "key": "delete",
         "mac": "backspace",
