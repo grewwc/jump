@@ -1399,15 +1399,68 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!text) {
       return '';
     }
+
+    // LLM often generates malformed markdown tables (e.g. mismatched columns).
+    // Let's try to fix them before passing to marked.
+    function fixMarkdownTables(txt) {
+      const lines = txt.split('\\n');
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        // Match a table delimiter row like ---|---|--- or |---|---|---|
+        if (/^\\|? *[:-]+ *\\| *[:-]+ *(?:\\| *[:-]+ *)*\\|?$/.test(line)) {
+          const headerLine = lines[i - 1].trim();
+          if (!headerLine.includes('|')) continue;
+          
+          const countCols = (l) => l.replace(/^\\|/, '').replace(/\\|$/, '').split('|').length;
+          
+          const delimCols = countCols(line);
+          const headerCols = countCols(headerLine);
+          
+          if (headerCols < delimCols) {
+            const diff = delimCols - headerCols;
+            let newHeader = headerLine;
+            if (newHeader.startsWith('|')) {
+              newHeader = newHeader.substring(1);
+            }
+            newHeader = '|' + '   |'.repeat(diff) + ' ' + newHeader;
+            lines[i - 1] = newHeader;
+          } else if (delimCols < headerCols) {
+            const diff = headerCols - delimCols;
+            let newDelim = line;
+            if (newDelim.endsWith('|')) {
+              newDelim = newDelim.substring(0, newDelim.length - 1);
+            }
+            newDelim = newDelim + '|---'.repeat(diff) + '|';
+            lines[i] = newDelim;
+          }
+          
+          if (!lines[i].trim().startsWith('|')) {
+            lines[i] = '| ' + lines[i].trim();
+          }
+          
+          for (let j = i + 1; j < lines.length; j++) {
+            const dataLine = lines[j].trim();
+            if (dataLine === '' || !dataLine.includes('|')) break; // End of table
+            if (!dataLine.startsWith('|')) {
+              lines[j] = '| ' + lines[j].trim();
+            }
+          }
+        }
+      }
+      return lines.join('\\n');
+    }
+
+    const fixedText = fixMarkdownTables(text);
+
     if (typeof marked !== 'undefined') {
-      return marked.parse(text, {
+      return marked.parse(fixedText, {
         gfm: true,
         breaks: true,
         async: false
       });
     }
     // Very simple fallback if marked fails to load
-    let html = escapeHtml(text);
+    let html = escapeHtml(fixedText);
     html = html.replace(/\\n/g, '<br>');
     return html;
   }
