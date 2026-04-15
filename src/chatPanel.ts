@@ -39,6 +39,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private sessionId: string;
   private currentProcess: cp.ChildProcess | null = null;
+  private currentStreamingOutput: string = '';
+  private isStreaming: boolean = false;
   private stopEscalationTimer: NodeJS.Timeout | null = null;
   private agentBinary: string;
   private currentSelection: SelectionContext | null = null;
@@ -150,6 +152,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         messages: session.messages,
       },
     });
+    // Ensure frontend state resets if backend is not streaming
+    if (!this.isStreaming) {
+      this.view?.webview.postMessage({ type: 'endResponse' });
+    }
   }
 
   public async switchSessionQuickPick(): Promise<void> {
@@ -199,13 +205,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
     this.postCurrentSessionToWebview();
 
+    if (this.isStreaming && this.currentStreamingOutput) {
+      webviewView.webview.postMessage({ type: 'startResponse' });
+      webviewView.webview.postMessage({ type: 'streamChunk', text: this.currentStreamingOutput });
+    }
+
     webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
+        case 'errorMessage':
+          console.error('[Webview Error]', data.text);
+          break;
         case 'sendMessage':
+          console.log('[Extension] Received sendMessage:', data.text);
           await this.handleUserMessage(data.text);
           break;
         case 'stop':
+          console.log('Received stop command from webview');
+          this.view?.webview.postMessage({ type: 'statusFlag', label: 'Stopping...' });
           this.stopCurrentProcess();
+          // Always ensure the UI stops streaming when stop is clicked
+          this.isStreaming = false;
+          this.view?.webview.postMessage({ type: 'endResponse' });
           break;
         case 'clearChat':
           this.newSession();
@@ -241,6 +261,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'openFile':
           await this.openFileAtLine(data.filePath, data.line);
+          break;
+        case 'debug':
+          console.log('[Webview Debug]', data.text);
           break;
       }
     });
@@ -341,6 +364,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage({ type: 'filesUpdate', files: chips });
   }
 
+  private forceCleanup(): void {
+    if (this.currentProcess) {
+      try {
+        this.currentProcess.kill('SIGKILL');
+      } catch (e) { }
+      this.currentProcess = null;
+    }
+    this.clearStopEscalationTimer();
+    this.isStreaming = false;
+    this.view?.webview.postMessage({ type: 'endResponse' });
+  }
+
   private stopCurrentProcess(): void {
     if (this.currentProcess) {
       this.signalCurrentProcess('SIGINT');
@@ -358,8 +393,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return;
           }
           this.signalCurrentProcess('SIGKILL');
+          this.forceCleanup();
         }, ChatViewProvider.stopForceKillMs - ChatViewProvider.stopGracePeriodMs);
       }, ChatViewProvider.stopGracePeriodMs);
+    } else {
+      this.forceCleanup();
     }
   }
 
@@ -409,7 +447,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleUserMessage(text: string): Promise<void> {
-    if (!text.trim()) { return; }
+    console.log('[Extension] handleUserMessage called with:', text, 'isStreaming:', this.isStreaming);
+    if (!text.trim() || this.isStreaming) { return; }
 
     // Build final prompt with selection context prepended
     let prompt = text;
@@ -467,7 +506,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       child.stdin?.write(prompt + '\n');
       child.stdin?.end();
 
-      let fullOutput = '';
+      this.currentStreamingOutput = '';
+      this.isStreaming = true;
       let headerDone = false;
       let insideThinking = false;
       let stdoutBuffer = '';
@@ -480,7 +520,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (!textChunk) {
           return;
         }
-        fullOutput += textChunk;
+        this.currentStreamingOutput += textChunk;
         this.view?.webview.postMessage({ type: 'streamChunk', text: textChunk });
       };
 
@@ -595,7 +635,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.view?.webview.postMessage({ type: 'toolStart', name });
           // Add a code block start to neatly display the tool call content
           const codeBlockStart = '```\n';
-          fullOutput += codeBlockStart;
+          this.currentStreamingOutput += codeBlockStart;
           this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockStart });
           return;
         }
@@ -603,7 +643,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.view?.webview.postMessage({ type: 'toolEnd' });
           // Add a code block end
           const codeBlockEnd = '\n```\n';
-          fullOutput += codeBlockEnd;
+          this.currentStreamingOutput += codeBlockEnd;
           this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockEnd });
           return;
         }
@@ -682,19 +722,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           processLine(stdoutBuffer);
           stdoutBuffer = '';
         }
-        const content = fullOutput.trim();
+        const content = this.currentStreamingOutput.trim();
         if (content) {
           const current = this.getCurrentSession();
           current.messages.push({ role: 'assistant', content });
           current.updatedAt = Date.now();
           void this.saveSessions();
         }
+        this.isStreaming = false;
         this.view?.webview.postMessage({ type: 'endResponse' });
       });
 
       child.on('error', (err) => {
         this.clearStopEscalationTimer();
         this.currentProcess = null;
+        this.isStreaming = false;
         this.view?.webview.postMessage({
           type: 'errorMessage',
           text: `Failed to start agent: ${err.message}\nMake sure the binary path is correct in settings (jumpHistory.agentBinaryPath).`,
@@ -702,6 +744,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ type: 'endResponse' });
       });
     } catch (err: any) {
+      this.currentProcess = null;
+      this.isStreaming = false;
       this.view?.webview.postMessage({
         type: 'errorMessage',
         text: `Error: ${err.message}`,
@@ -712,6 +756,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const nonce = getNonce();
+    // Use fallback marked parser from unpkg if local is broken, or just inline
     const markedJsUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'marked', 'lib', 'marked.umd.js')
     );
@@ -852,29 +897,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     opacity: 0.6;
   }
   .header-actions button:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
-  #cancelBtn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--vscode-errorForeground);
-    border: 1px solid var(--vscode-inputValidation-errorBorder, transparent);
-    padding: 0 5px;
-    line-height: 18px;
-    min-width: 18px;
-    height: 20px;
-    font-size: 12px;
-    opacity: 0.35;
-  }
-  #cancelBtn:disabled {
-    cursor: default;
-    opacity: 0.25;
-    color: var(--vscode-disabledForeground);
-    border-color: transparent;
+  .send-btn.stop-mode {
     background: transparent;
+    color: var(--vscode-errorForeground);
+    border-color: var(--vscode-inputValidation-errorBorder, transparent);
   }
-  #cancelBtn.active {
-    opacity: 0.95;
+  .send-btn.stop-mode:hover {
     background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground, transparent) 60%, transparent);
+    border-color: transparent;
+  }
+  .send-btn:active {
+    transform: scale(0.9);
+  }
+  @keyframes btn-vibrate {
+    0% { transform: scale(1) translateX(0); }
+    25% { transform: scale(0.95) translateX(-2px); }
+    50% { transform: scale(0.95) translateX(2px); }
+    75% { transform: scale(0.95) translateX(-2px); }
+    100% { transform: scale(1) translateX(0); }
+  }
+  .send-btn.vibrate {
+    animation: btn-vibrate 0.2s ease-in-out;
   }
 
   /* Messages */
@@ -1183,10 +1226,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   .context-chip .chip-remove:hover { opacity: 1; }
   .context-chip.selection { background: var(--vscode-textPreformat-background, var(--vscode-badge-background)); }
   .context-chip.file { background: var(--vscode-badge-background); }
-  .add-file-btn {
+  .input-actions {
     position: absolute;
     right: 8px;
     bottom: 8px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .add-file-btn, .send-btn {
     background: var(--vscode-button-secondaryBackground);
     border: 1px solid var(--vscode-panel-border);
     color: var(--vscode-foreground);
@@ -1201,7 +1249,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     align-items: center;
     justify-content: center;
   }
-  .add-file-btn:hover { opacity: 1; border-color: var(--vscode-focusBorder); }
+  .send-btn {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: transparent;
+  }
+  .add-file-btn:hover, .send-btn:hover { opacity: 1; border-color: var(--vscode-focusBorder); }
+  .add-file-btn:disabled, .send-btn:disabled { opacity: 0.3; cursor: default; }
 </style>
 </head>
 <body>
@@ -1211,7 +1265,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span class="session-title" id="sessionTitle">New Chat</span>
     </div>
     <div class="header-actions">
-      <button id="cancelBtn" title="Stop Current Response (Ctrl+C)" disabled>■</button>
       <button id="switchSessionBtn" title="Switch Session">☰</button>
       <button id="renameSessionBtn" title="Rename Session">✎</button>
       <button id="deleteSessionBtn" title="Delete Session">🗑</button>
@@ -1228,10 +1281,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="input-area">
     <div class="input-wrapper">
       <textarea id="input" rows="3" placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"></textarea>
-      <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
+      <div class="input-actions">
+        <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
+        <button class="send-btn" id="sendBtn" title="Send (Enter)">↑</button>
+      </div>
     </div>
   </div>
 
+<script nonce="${nonce}">
+  var exports = undefined;
+  var module = undefined;
+  var define = undefined;
+</script>
 <script nonce="${nonce}" src="${markedJsUri}"></script>
 <script nonce="${nonce}" src="${katexJsUri}"></script>
 <script nonce="${nonce}" src="${katexAutoRenderJsUri}"></script>
@@ -1258,10 +1319,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <script nonce="${nonce}" src="${mermaidJsUri}"></script>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
+  window.addEventListener('error', (event) => {
+    vscode.postMessage({ type: 'errorMessage', text: 'Webview Script Error: ' + event.message });
+  });
+
   const messagesEl = document.getElementById('messages');
   const welcomeEl = document.getElementById('welcome');
   const inputEl = document.getElementById('input');
-  const cancelBtn = document.getElementById('cancelBtn');
   const newChatBtn = document.getElementById('newChatBtn');
   const switchSessionBtn = document.getElementById('switchSessionBtn');
   const renameSessionBtn = document.getElementById('renameSessionBtn');
@@ -1269,6 +1333,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const sessionTitleEl = document.getElementById('sessionTitle');
   const contextArea = document.getElementById('contextArea');
   const addFileBtn = document.getElementById('addFileBtn');
+  const sendBtn = document.getElementById('sendBtn');
 
   let isStreaming = false;
   let currentAssistantEl = null;
@@ -1298,19 +1363,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!text) {
       return '';
     }
-    return marked.parse(escapeHtml(text), {
-      gfm: true,
-      breaks: true,
-      async: false
-    });
+    if (typeof marked !== 'undefined') {
+      return marked.parse(escapeHtml(text), {
+        gfm: true,
+        breaks: true,
+        async: false
+      });
+    }
+    // Very simple fallback if marked fails to load
+    let html = escapeHtml(text);
+    html = html.replace(/\\n/g, '<br>');
+    return html;
   }
 
   function linkifyPaths(html) {
     var insideCode = false;
     return html.replace(/((?:<[^>]+>)|(?:[^<]+))/g, function(segment) {
       if (segment.startsWith('<')) {
-        if (/<code/i.test(segment) || /<pre/i.test(segment)) insideCode = true;
-        if (/<\\/code/i.test(segment) || /<\\/pre/i.test(segment)) insideCode = false;
+        const lower = segment.toLowerCase();
+        if (lower.includes('<code') || lower.includes('<pre')) insideCode = true;
+        if (lower.includes('</code') || lower.includes('</pre')) insideCode = false;
         return segment;
       }
       if (insideCode) return segment;
@@ -1586,31 +1658,59 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   function setStreaming(val) {
     isStreaming = val;
-    cancelBtn.disabled = !val;
-    cancelBtn.classList.toggle('active', val);
     inputEl.disabled = val;
     addFileBtn.disabled = val;
-    if (!val) inputEl.focus();
+    if (val) {
+      sendBtn.textContent = '■';
+      sendBtn.title = 'Stop generating';
+      sendBtn.classList.add('stop-mode');
+    } else {
+      sendBtn.textContent = '↑';
+      sendBtn.title = 'Send (Enter)';
+      sendBtn.classList.remove('stop-mode');
+      inputEl.focus();
+    }
+  }
+
+  function endResponse() {
+    renderPending = false;
+    flushAssistantRender();
+    currentAssistantEl = null;
+    currentAssistantMetaEl = null;
+    currentAssistantContentEl = null;
+    currentAssistantRaw = '';
+    setStreaming(false);
   }
 
   function sendMessage() {
-    const text = inputEl.value.trim();
-    if (!text || isStreaming) return;
-    inputHistory.unshift(text);
-    historyIndex = -1;
-    savedInput = '';
-    persistHistory();
-    addUserMessage(text);
-    vscode.postMessage({ type: 'sendMessage', text });
-    inputEl.value = '';
-    inputEl.style.height = 'auto';
-    setStreaming(true);
+    try {
+      const text = inputEl.value.trim();
+      vscode.postMessage({ type: 'debug', text: 'sendMessage triggered with text: ' + text + ', isStreaming: ' + isStreaming });
+      if (!text || isStreaming) {
+        return;
+      }
+      if (!Array.isArray(inputHistory)) {
+        inputHistory = [];
+      }
+      inputHistory.unshift(text);
+      historyIndex = -1;
+      savedInput = '';
+      persistHistory();
+      addUserMessage(text);
+      vscode.postMessage({ type: 'sendMessage', text });
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      setStreaming(true);
+    } catch (e) {
+      vscode.postMessage({ type: 'errorMessage', text: 'sendMessage error: ' + e.message + '\\n' + e.stack });
+      // Fallback: try to at least send the message if UI update fails
+      try {
+        vscode.postMessage({ type: 'sendMessage', text: inputEl.value.trim() });
+      } catch (e2) {}
+    }
   }
 
   // ── Event handlers ──
-  cancelBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'stop' });
-  });
   newChatBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'newSession' });
     messagesEl.innerHTML = '';
@@ -1642,6 +1742,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   addFileBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'addFile' });
+  });
+
+  sendBtn.addEventListener('click', () => {
+    sendBtn.classList.remove('vibrate');
+    void sendBtn.offsetWidth; // Trigger reflow to restart animation
+    sendBtn.classList.add('vibrate');
+
+    if (isStreaming) {
+      vscode.postMessage({ type: 'stop' });
+    } else {
+      sendMessage();
+    }
   });
 
   inputEl.addEventListener('keydown', (e) => {
@@ -1806,13 +1918,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         appendToAssistant(data.text);
         break;
       case 'endResponse':
-        renderPending = false;
-        flushAssistantRender();
-        currentAssistantEl = null;
-        currentAssistantMetaEl = null;
-        currentAssistantContentEl = null;
-        currentAssistantRaw = '';
-        setStreaming(false);
+        endResponse();
         break;
       case 'errorMessage': {
         const el = document.createElement('div');

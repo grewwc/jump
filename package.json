@@ -290,6 +290,12 @@
         "when": "focusedView == jumpHistoryTree && listFocus"
       },
       {
+        "command": "jumpHistoryChat.focus",
+        "key": "cmd+shift+i",
+        "mac": "cmd+shift+i",
+        "win": "ctrl+shift+i"
+      },
+      {
         "command": "workbench.action.toggleSidebarVisibility",
         "key": "ctrl+alt+j",
         "mac": "cmd+alt+j",
