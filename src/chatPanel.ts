@@ -33,10 +33,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'jumpHistoryChat';
   private static readonly sessionsStateKey = 'jumpHistory.chat.sessions';
   private static readonly maxSessions = 50;
+  private static readonly stopGracePeriodMs = 1500;
+  private static readonly stopForceKillMs = 4000;
 
   private view?: vscode.WebviewView;
   private sessionId: string;
   private currentProcess: cp.ChildProcess | null = null;
+  private stopEscalationTimer: NodeJS.Timeout | null = null;
   private agentBinary: string;
   private currentSelection: SelectionContext | null = null;
   private attachedFiles: string[] = [];
@@ -340,8 +343,54 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private stopCurrentProcess(): void {
     if (this.currentProcess) {
-      // Ctrl+C semantics for agent cancellation.
-      this.currentProcess.kill('SIGINT');
+      this.signalCurrentProcess('SIGINT');
+
+      // Some agent binaries spawn subprocess trees. If Ctrl+C is ignored,
+      // escalate after a short grace period so the stop button is reliable.
+      this.clearStopEscalationTimer();
+      this.stopEscalationTimer = setTimeout(() => {
+        if (!this.currentProcess) {
+          return;
+        }
+        this.signalCurrentProcess('SIGTERM');
+        this.stopEscalationTimer = setTimeout(() => {
+          if (!this.currentProcess) {
+            return;
+          }
+          this.signalCurrentProcess('SIGKILL');
+        }, ChatViewProvider.stopForceKillMs - ChatViewProvider.stopGracePeriodMs);
+      }, ChatViewProvider.stopGracePeriodMs);
+    }
+  }
+
+  private clearStopEscalationTimer(): void {
+    if (this.stopEscalationTimer) {
+      clearTimeout(this.stopEscalationTimer);
+      this.stopEscalationTimer = null;
+    }
+  }
+
+  private signalCurrentProcess(signal: NodeJS.Signals): void {
+    const child = this.currentProcess;
+    if (!child) {
+      return;
+    }
+
+    try {
+      // On POSIX, spawn detached children so we can signal the whole process
+      // group. This reliably stops agent wrappers plus their worker children.
+      if (process.platform !== 'win32' && child.pid) {
+        process.kill(-child.pid, signal);
+        return;
+      }
+    } catch {
+      // Fall back to signaling just the direct child.
+    }
+
+    try {
+      child.kill(signal);
+    } catch {
+      // Ignore failures if the process has already exited.
     }
   }
 
@@ -407,10 +456,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       const child = cp.spawn(this.agentBinary, args, {
         cwd,
+        detached: process.platform !== 'win32',
         env: { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.currentProcess = child;
+      this.clearStopEscalationTimer();
 
       // Write the user message to stdin and close it
       child.stdin?.write(prompt + '\n');
@@ -625,6 +676,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
 
       child.on('close', () => {
+        this.clearStopEscalationTimer();
         this.currentProcess = null;
         if (stdoutBuffer.trim().length > 0) {
           processLine(stdoutBuffer);
@@ -641,6 +693,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
 
       child.on('error', (err) => {
+        this.clearStopEscalationTimer();
         this.currentProcess = null;
         this.view?.webview.postMessage({
           type: 'errorMessage',
