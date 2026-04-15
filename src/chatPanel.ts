@@ -264,6 +264,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'debug':
           console.log('[Webview Debug]', data.text);
+          try {
+            require('fs').appendFileSync(require('path').join(vscode.workspace.workspaceFolders?.[0].uri.fsPath || '', 'debug-webview.log'), data.text + '\\n');
+          } catch (e) { }
           break;
       }
     });
@@ -756,10 +759,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const nonce = getNonce();
-    // Use fallback marked parser from unpkg if local is broken, or just inline
-    const markedJsUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'marked', 'lib', 'marked.umd.js')
-    );
+    // Inline marked.umd.js to guarantee it loads and avoids CSP/AMD issues
+    const markedJsPath = vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'marked', 'lib', 'marked.umd.js').fsPath;
+    let markedCode = '';
+    try {
+      markedCode = require('fs').readFileSync(markedJsPath, 'utf8').replace(/<\/script>/gi, '<\\/script>');
+    } catch (e) {
+      console.error('Failed to read marked.umd.js', e);
+    }
+
     const katexCssUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist', 'katex.min.css')
     );
@@ -1289,11 +1297,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   </div>
 
 <script nonce="${nonce}">
-  var exports = undefined;
-  var module = undefined;
-  var define = undefined;
+  // Hide module, exports, and AMD define so UMD libraries expose themselves globally
+  var __oldDefine = window.define;
+  window.define = undefined;
+  var __oldModule = window.module;
+  window.module = undefined;
+  var __oldExports = window.exports;
+  window.exports = undefined;
 </script>
-<script nonce="${nonce}" src="${markedJsUri}"></script>
+<script nonce="${nonce}">
+  ${markedCode}
+</script>
 <script nonce="${nonce}" src="${katexJsUri}"></script>
 <script nonce="${nonce}" src="${katexAutoRenderJsUri}"></script>
 <script nonce="${nonce}" src="${prismJsUri}"></script>
@@ -1318,10 +1332,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <script nonce="${nonce}" src="${prismMarkdownJsUri}"></script>
 <script nonce="${nonce}" src="${mermaidJsUri}"></script>
 <script nonce="${nonce}">
+  // Restore original AMD/CommonJS environment
+  window.define = __oldDefine;
+  window.module = __oldModule;
+  window.exports = __oldExports;
+</script>
+<script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   window.addEventListener('error', (event) => {
-    vscode.postMessage({ type: 'errorMessage', text: 'Webview Script Error: ' + event.message });
+    vscode.postMessage({ type: 'errorMessage', text: 'Webview Script Error: ' + event.message + '\\nSource: ' + event.filename });
   });
+
+  setTimeout(() => {
+    vscode.postMessage({ type: 'debug', text: 'marked defined: ' + (typeof marked !== 'undefined') });
+    vscode.postMessage({ type: 'debug', text: 'prism defined: ' + (typeof Prism !== 'undefined') });
+    vscode.postMessage({ type: 'debug', text: 'mermaid defined: ' + (typeof mermaid !== 'undefined') });
+  }, 1000);
 
   const messagesEl = document.getElementById('messages');
   const welcomeEl = document.getElementById('welcome');
@@ -1374,7 +1400,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return '';
     }
     if (typeof marked !== 'undefined') {
-      return marked.parse(escapeHtml(text), {
+      return marked.parse(text, {
         gfm: true,
         breaks: true,
         async: false
