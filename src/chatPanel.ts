@@ -1801,7 +1801,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     
     // Check if the time since the last compositionend is very short
-    if (e.key === 'Enter' && (Date.now() - lastImeEndTime < 200)) {
+    if (e.key === 'Enter' && (Date.now() - lastImeEndTime < 100)) {
       return;
     }
 
