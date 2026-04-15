@@ -659,12 +659,92 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const nonce = getNonce();
+    const markedJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'marked', 'lib', 'marked.umd.js')
+    );
+    const katexCssUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist', 'katex.min.css')
+    );
+    const katexJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist', 'katex.min.js')
+    );
+    const katexAutoRenderJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist', 'contrib', 'auto-render.min.js')
+    );
+    const prismCssUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'themes', 'prism-tomorrow.min.css')
+    );
+    const prismJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'prism.js')
+    );
+    const prismMarkupJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-markup.min.js')
+    );
+    const prismCssLangJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-css.min.js')
+    );
+    const prismClikeJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-clike.min.js')
+    );
+    const prismJsLangJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-javascript.min.js')
+    );
+    const prismTsJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-typescript.min.js')
+    );
+    const prismJsxJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-jsx.min.js')
+    );
+    const prismTsxJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-tsx.min.js')
+    );
+    const prismJsonJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-json.min.js')
+    );
+    const prismBashJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-bash.min.js')
+    );
+    const prismPythonJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-python.min.js')
+    );
+    const prismRustJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-rust.min.js')
+    );
+    const prismGoJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-go.min.js')
+    );
+    const prismYamlJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-yaml.min.js')
+    );
+    const prismDiffJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-diff.min.js')
+    );
+    const prismSqlJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-sql.min.js')
+    );
+    const prismJavaJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-java.min.js')
+    );
+    const prismCJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-c.min.js')
+    );
+    const prismCppJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-cpp.min.js')
+    );
+    const prismMarkdownJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-markdown.min.js')
+    );
+    const mermaidJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'mermaid', 'dist', 'mermaid.min.js')
+    );
     return /*html*/ `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}' ${webview.cspSource}; script-src 'nonce-${nonce}' ${webview.cspSource}; font-src ${webview.cspSource};">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="${katexCssUri}">
+<link rel="stylesheet" href="${prismCssUri}">
 <style nonce="${nonce}">
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -907,6 +987,70 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     text-decoration-style: dotted;
     cursor: pointer;
   }
+  .assistant-content table {
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    margin: 8px 0;
+    border: 1px solid var(--vscode-panel-border);
+  }
+  .assistant-content th,
+  .assistant-content td {
+    border: 1px solid var(--vscode-panel-border);
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .assistant-content th {
+    background: var(--vscode-editor-inactiveSelectionBackground, var(--vscode-list-hoverBackground));
+    font-weight: 600;
+  }
+  .assistant-content hr {
+    border: none;
+    border-top: 1px solid var(--vscode-panel-border);
+    margin: 12px 0;
+  }
+  .assistant-content .katex-display {
+    margin: 10px 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 2px;
+  }
+  .assistant-content .katex {
+    font-size: 1.02em;
+  }
+  .assistant-content del {
+    opacity: 0.8;
+  }
+  .assistant-content ul.contains-task-list {
+    list-style: none;
+    padding-left: 0;
+  }
+  .assistant-content li.task-list-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .assistant-content li.task-list-item input[type="checkbox"] {
+    margin-top: 0.25em;
+    pointer-events: none;
+  }
+  .assistant-content .mermaid-block {
+    margin: 10px 0;
+    padding: 10px 12px;
+    background: var(--vscode-editorWidget-background, var(--vscode-textCodeBlock-background));
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+  .assistant-content .mermaid-error {
+    color: var(--vscode-errorForeground);
+    white-space: pre-wrap;
+    font-family: var(--vscode-editor-font-family);
+    font-size: 12px;
+  }
 
   /* Input area */
   .input-area {
@@ -1030,11 +1174,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="context-area" id="contextArea"></div>
   <div class="input-area">
     <div class="input-wrapper">
-      <textarea id="input" rows="3" placeholder="Ask a question... (Enter for newline, Cmd+Enter or Shift+Enter to send)"></textarea>
+      <textarea id="input" rows="3" placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"></textarea>
       <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
     </div>
   </div>
 
+<script nonce="${nonce}" src="${markedJsUri}"></script>
+<script nonce="${nonce}" src="${katexJsUri}"></script>
+<script nonce="${nonce}" src="${katexAutoRenderJsUri}"></script>
+<script nonce="${nonce}" src="${prismJsUri}"></script>
+<script nonce="${nonce}" src="${prismMarkupJsUri}"></script>
+<script nonce="${nonce}" src="${prismCssLangJsUri}"></script>
+<script nonce="${nonce}" src="${prismClikeJsUri}"></script>
+<script nonce="${nonce}" src="${prismJsLangJsUri}"></script>
+<script nonce="${nonce}" src="${prismTsJsUri}"></script>
+<script nonce="${nonce}" src="${prismJsxJsUri}"></script>
+<script nonce="${nonce}" src="${prismTsxJsUri}"></script>
+<script nonce="${nonce}" src="${prismJsonJsUri}"></script>
+<script nonce="${nonce}" src="${prismBashJsUri}"></script>
+<script nonce="${nonce}" src="${prismPythonJsUri}"></script>
+<script nonce="${nonce}" src="${prismRustJsUri}"></script>
+<script nonce="${nonce}" src="${prismGoJsUri}"></script>
+<script nonce="${nonce}" src="${prismYamlJsUri}"></script>
+<script nonce="${nonce}" src="${prismDiffJsUri}"></script>
+<script nonce="${nonce}" src="${prismSqlJsUri}"></script>
+<script nonce="${nonce}" src="${prismJavaJsUri}"></script>
+<script nonce="${nonce}" src="${prismCJsUri}"></script>
+<script nonce="${nonce}" src="${prismCppJsUri}"></script>
+<script nonce="${nonce}" src="${prismMarkdownJsUri}"></script>
+<script nonce="${nonce}" src="${mermaidJsUri}"></script>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const messagesEl = document.getElementById('messages');
@@ -1056,6 +1224,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let currentAssistantRaw = '';
   let currentSelection = null;
   let attachedFiles = [];
+  let mermaidInitialized = false;
 
   // ── Input history (persisted across reload) ──
   const prevState = vscode.getState() || {};
@@ -1073,46 +1242,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   function renderMarkdown(text) {
-    // Escape HTML entities first to prevent injection
-    text = escapeHtml(text);
-
-    // 1. Extract code blocks into placeholders so newline handling won't corrupt them
-    var codeBlocks = [];
-    text = text.replace(/\`\`\`([^\\r\\n]*)\\r?\\n([\\s\\S]*?)\`\`\`/g, function(_, lang, code) {
-      var idx = codeBlocks.length;
-      codeBlocks.push('<pre><code class="lang-' + escapeHtml((lang || '').trim()) + '">' + code.trimEnd() + '</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>');
-      return '\\x00CB' + idx + '\\x00';
+    if (!text) {
+      return '';
+    }
+    return marked.parse(escapeHtml(text), {
+      gfm: true,
+      breaks: true,
+      async: false
     });
-
-    // 2. Inline code
-    text = text.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
-    // Bold
-    text = text.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
-    // Italic
-    text = text.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
-    // Headers
-    text = text.replace(/^### (.+)$/gm, '</p><h3>$1</h3><p>');
-    text = text.replace(/^## (.+)$/gm, '</p><h2>$1</h2><p>');
-    text = text.replace(/^# (.+)$/gm, '</p><h1>$1</h1><p>');
-    // Links [text](url)
-    text = text.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" target="_blank">$1</a>');
-    // Blockquotes (&gt; after HTML escaping)
-    text = text.replace(/^&gt; (.+)$/gm, '</p><blockquote>$1</blockquote><p>');
-    // Unordered list items
-    text = text.replace(/^- (.+)$/gm, '<li>$1</li>');
-    // Paragraph breaks: double newlines
-    text = text.replace(/\\n{2,}/g, '</p><p>');
-    // Single newlines to <br>
-    text = text.replace(/\\n/g, '<br>');
-    // Wrap in paragraph tags and clean up empties
-    text = '<p>' + text + '</p>';
-    text = text.replace(/<p>[\\s]*<\\/p>/g, '');
-
-    // 3. Re-insert code blocks
-    text = text.replace(/\\x00CB(\\d+)\\x00/g, function(_, idx) {
-      return codeBlocks[parseInt(idx, 10)] || '';
-    });
-    return text;
   }
 
   function linkifyPaths(html) {
@@ -1141,6 +1278,187 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   // Make copyCode globally available
   window.copyCode = copyCode;
+
+  function addCopyButtons(container) {
+    container.querySelectorAll('pre').forEach((pre) => {
+      if (pre.querySelector('.copy-btn')) {
+        return;
+      }
+      const code = pre.querySelector('code');
+      if (!code) {
+        return;
+      }
+      const btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.textContent = 'Copy';
+      btn.addEventListener('click', () => copyCode(btn));
+      pre.appendChild(btn);
+    });
+  }
+
+  function normalizeCodeLanguage(codeEl) {
+    const classNames = Array.from(codeEl.classList);
+    for (const name of classNames) {
+      if (name.startsWith('language-')) {
+        return name.slice('language-'.length).toLowerCase();
+      }
+    }
+    return '';
+  }
+
+  function upgradeCodeLanguages(container) {
+    container.querySelectorAll('pre code').forEach((code) => {
+      const lang = normalizeCodeLanguage(code);
+      if (!lang) {
+        return;
+      }
+      if (lang === 'shell' && !code.classList.contains('language-bash')) {
+        code.classList.add('language-bash');
+      }
+      if (lang === 'sh' && !code.classList.contains('language-bash')) {
+        code.classList.add('language-bash');
+      }
+      if (lang === 'ts' && !code.classList.contains('language-typescript')) {
+        code.classList.add('language-typescript');
+      }
+      if (lang === 'js' && !code.classList.contains('language-javascript')) {
+        code.classList.add('language-javascript');
+      }
+      if (lang === 'html' && !code.classList.contains('language-markup')) {
+        code.classList.add('language-markup');
+      }
+      if (lang === 'yml' && !code.classList.contains('language-yaml')) {
+        code.classList.add('language-yaml');
+      }
+      if (lang === 'md' && !code.classList.contains('language-markdown')) {
+        code.classList.add('language-markdown');
+      }
+    });
+  }
+
+  function highlightCodeBlocks(container) {
+    if (typeof Prism === 'undefined') {
+      return;
+    }
+    container.querySelectorAll('pre code').forEach((code) => {
+      const lang = normalizeCodeLanguage(code);
+      if (lang === 'mermaid') {
+        return;
+      }
+      Prism.highlightElement(code);
+    });
+  }
+
+  function upgradeLinks(container) {
+    container.querySelectorAll('a[href]').forEach((link) => {
+      if (link.classList.contains('file-link')) {
+        return;
+      }
+      link.setAttribute('target', '_blank');
+      link.setAttribute('rel', 'noopener noreferrer');
+    });
+  }
+
+  function ensureMermaid() {
+    if (mermaidInitialized || typeof mermaid === 'undefined') {
+      return;
+    }
+    const styles = getComputedStyle(document.body);
+    const fg = styles.getPropertyValue('--vscode-foreground').trim() || '#d4d4d4';
+    const bg = styles.getPropertyValue('--vscode-editorWidget-background').trim()
+      || styles.getPropertyValue('--vscode-sideBar-background').trim()
+      || '#1e1e1e';
+    const border = styles.getPropertyValue('--vscode-panel-border').trim() || fg;
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'base',
+      themeVariables: {
+        darkMode: true,
+        background: bg,
+        mainBkg: bg,
+        primaryColor: bg,
+        secondaryColor: bg,
+        primaryBorderColor: border,
+        lineColor: fg,
+        textColor: fg,
+        primaryTextColor: fg
+      }
+    });
+    mermaidInitialized = true;
+  }
+
+  function upgradeMermaidBlocks(container) {
+    container.querySelectorAll('pre > code').forEach((code) => {
+      const lang = normalizeCodeLanguage(code);
+      if (lang !== 'mermaid') {
+        return;
+      }
+      const pre = code.parentElement;
+      if (!pre || !pre.parentElement) {
+        return;
+      }
+      const wrapper = document.createElement('div');
+      wrapper.className = 'mermaid-block';
+      const node = document.createElement('div');
+      node.className = 'mermaid';
+      node.textContent = code.textContent || '';
+      wrapper.appendChild(node);
+      pre.replaceWith(wrapper);
+    });
+  }
+
+  function renderMermaid(container) {
+    ensureMermaid();
+    if (typeof mermaid === 'undefined') {
+      return;
+    }
+    const nodes = Array.from(container.querySelectorAll('.mermaid'));
+    if (nodes.length === 0) {
+      return;
+    }
+    Promise.resolve(mermaid.run({ nodes })).catch((err) => {
+      nodes.forEach((node) => {
+        if (node.querySelector('svg')) {
+          return;
+        }
+        node.classList.remove('mermaid');
+        node.classList.add('mermaid-error');
+        node.textContent = 'Mermaid render failed\\n' + ((err && err.message) || String(err));
+      });
+    });
+  }
+
+  function renderMath(container) {
+    if (typeof renderMathInElement !== 'function') {
+      return;
+    }
+    try {
+      renderMathInElement(container, {
+        throwOnError: false,
+        strict: 'ignore',
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '\\[', right: '\\]', display: true },
+          { left: '$', right: '$', display: false },
+          { left: '\\(', right: '\\)', display: false }
+        ]
+      });
+    } catch {
+      // Ignore invalid partial formulas while streaming.
+    }
+  }
+
+  function renderAssistantContent(container, rawText) {
+    container.innerHTML = linkifyPaths(renderMarkdown(rawText));
+    upgradeCodeLanguages(container);
+    upgradeMermaidBlocks(container);
+    addCopyButtons(container);
+    highlightCodeBlocks(container);
+    upgradeLinks(container);
+    renderMermaid(container);
+    renderMath(container);
+  }
 
   function scrollToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -1182,7 +1500,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!currentAssistantContentEl) {
       return;
     }
-    currentAssistantContentEl.innerHTML = linkifyPaths(renderMarkdown(currentAssistantRaw));
+    renderAssistantContent(currentAssistantContentEl, currentAssistantRaw);
     scrollToBottom();
   }
 
@@ -1274,7 +1592,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   });
 
   inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.shiftKey || e.ctrlKey)) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
@@ -1387,7 +1705,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         el.className = 'message assistant';
         const contentEl = document.createElement('div');
         contentEl.className = 'assistant-content';
-        contentEl.innerHTML = linkifyPaths(renderMarkdown(msg.content || ''));
+        renderAssistantContent(contentEl, msg.content || '');
         el.appendChild(contentEl);
         messagesEl.appendChild(el);
       }
