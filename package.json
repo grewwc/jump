@@ -294,6 +294,18 @@
         "command": "jumpHistory.search",
         "key": "ctrl+f",
         "when": "focusedView == jumpHistoryTree && listFocus"
+      },
+      {
+        "command": "workbench.action.toggleSidebarVisibility",
+        "key": "ctrl+alt+j",
+        "mac": "cmd+alt+j",
+        "when": "sideBarVisible && activeViewlet == 'workbench.view.extension.jump-history'"
+      },
+      {
+        "command": "workbench.view.extension.jump-history",
+        "key": "ctrl+alt+j",
+        "mac": "cmd+alt+j",
+        "when": "!sideBarVisible || activeViewlet != 'workbench.view.extension.jump-history'"
       }
     ],
     "configuration": {
