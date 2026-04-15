@@ -504,7 +504,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const chatProvider = new ChatViewProvider(context.extensionUri, context.workspaceState);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatProvider)
+    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatProvider, {
+      webviewOptions: {
+        retainContextWhenHidden: true,
+      },
+    })
   );
   context.subscriptions.push(
     vscode.commands.registerCommand('jumpHistory.newChat', () => {
