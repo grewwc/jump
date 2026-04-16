@@ -216,11 +216,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           console.error('[Webview Error]', data.text);
           break;
         case 'sendMessage':
-          console.log('[Extension] Received sendMessage:', data.text);
           await this.handleUserMessage(data.text);
           break;
         case 'stop':
-          console.log('Received stop command from webview');
           this.view?.webview.postMessage({ type: 'statusFlag', label: 'Stopping...' });
           this.stopCurrentProcess();
           // Always ensure the UI stops streaming when stop is clicked
@@ -261,12 +259,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'openFile':
           await this.openFileAtLine(data.filePath, data.line);
-          break;
-        case 'debug':
-          console.log('[Webview Debug]', data.text);
-          try {
-            require('fs').appendFileSync(require('path').join(vscode.workspace.workspaceFolders?.[0].uri.fsPath || '', 'debug-webview.log'), data.text + '\\n');
-          } catch (e) { }
           break;
       }
     });
@@ -450,7 +442,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleUserMessage(text: string): Promise<void> {
-    console.log('[Extension] handleUserMessage called with:', text, 'isStreaming:', this.isStreaming);
     if (!text.trim() || this.isStreaming) { return; }
 
     // Build final prompt with selection context prepended
@@ -1343,12 +1334,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ type: 'errorMessage', text: 'Webview Script Error: ' + event.message + '\\nSource: ' + event.filename });
   });
 
-  setTimeout(() => {
-    vscode.postMessage({ type: 'debug', text: 'marked defined: ' + (typeof marked !== 'undefined') });
-    vscode.postMessage({ type: 'debug', text: 'prism defined: ' + (typeof Prism !== 'undefined') });
-    vscode.postMessage({ type: 'debug', text: 'mermaid defined: ' + (typeof mermaid !== 'undefined') });
-  }, 1000);
-
   const messagesEl = document.getElementById('messages');
   const welcomeEl = document.getElementById('welcome');
   const inputEl = document.getElementById('input');
@@ -1774,7 +1759,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   function sendMessage() {
     try {
       const text = inputEl.value.trim();
-      vscode.postMessage({ type: 'debug', text: 'sendMessage triggered with text: ' + text + ', isStreaming: ' + isStreaming });
       if (!text || isStreaming) {
         return;
       }
