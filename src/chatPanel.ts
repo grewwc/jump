@@ -579,25 +579,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const processLine = (rawLine: string) => {
         let line = rawLine;
 
+        // Thinking markers anywhere
+        if (line.match(/╭─\s*thinking/)) {
+          insideThinking = true;
+          this.view?.webview.postMessage({ type: 'thinkingStart' });
+          emitAssistantText('\n<details class="thinking-details"><summary>Thinking...</summary>\n\n');
+          return;
+        }
+        if (line.match(/╰─\s*done thinking/)) {
+          if (insideThinking) {
+            emitAssistantText('\n\n</details>\n\n');
+          }
+          insideThinking = false;
+          this.view?.webview.postMessage({ type: 'thinkingEnd' });
+          headerDone = true;
+          return;
+        }
+
+        // While inside a thinking block, emit content and return early
+        if (insideThinking) {
+          const stripped = line.replace(/^\s*[│|]\s?/, '');
+          emitAssistantText(stripped + '\n');
+          return;
+        }
+
         // Skip header lines (mcp info, model info, assistant info)
         if (!headerDone) {
           if (line.match(/^╭─\s*(mcp|assistant)/) || line.match(/^\[.*\(search:/) || line.trim() === '') {
-            return;
-          }
-          // Thinking markers
-          if (line.match(/╭─\s*thinking/)) {
-            insideThinking = true;
-            this.view?.webview.postMessage({ type: 'thinkingStart' });
-            return;
-          }
-          if (line.match(/╰─\s*done thinking/)) {
-            insideThinking = false;
-            this.view?.webview.postMessage({ type: 'thinkingEnd' });
-            headerDone = true;
-            return;
-          }
-          // While inside a thinking block, skip all content
-          if (insideThinking) {
             return;
           }
           // Tool call start — let it fall through to tool processing below
@@ -657,11 +665,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         // Ignore the 'output: streaming command output' prefix and 'is asking the same question again' log that Minimax might emit directly
         if (/^[│|]\s*output: streaming command output/i.test(trimmed)) {
-          return;
-        }
-        // If the model outputs the "done thinking" marker in the middle of text chunks, hide it
-        if (line.match(/╰─\s*done thinking/)) {
-          this.view?.webview.postMessage({ type: 'thinkingEnd' });
           return;
         }
 
@@ -995,6 +998,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     50%  { content: '..'; }
     75%  { content: '...'; }
     100% { content: ''; }
+  }
+
+  .thinking-details {
+    margin: 8px 0;
+    padding: 8px 12px;
+    border-left: 3px solid var(--vscode-editorInfo-foreground, #3794ff);
+    background: color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 10%, transparent);
+    border-radius: 4px;
+    font-size: 0.95em;
+    color: var(--vscode-descriptionForeground);
+  }
+  .thinking-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    margin-bottom: 4px;
+    user-select: none;
+    color: var(--vscode-editorInfo-foreground, #3794ff);
+  }
+  .thinking-details[open] summary {
+    margin-bottom: 8px;
+  }
+  .thinking-details > *:last-child {
+    margin-bottom: 0;
   }
 
   /* Tool indicator */
