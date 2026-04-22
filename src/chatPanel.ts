@@ -532,6 +532,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ type: 'streamChunk', text: textChunk });
       };
 
+      const blockStartToken = (kind: 'thinking' | 'tool', title: string) =>
+        `\n[[JUMP_BLOCK_START|${kind}|${encodeURIComponent(title)}]]\n`;
+      const blockEndToken = '\n[[JUMP_BLOCK_END]]\n';
+      const startStructuredBlock = (kind: 'thinking' | 'tool', title: string) => {
+        emitAssistantText(blockStartToken(kind, title));
+      };
+      const endStructuredBlock = () => {
+        emitAssistantText(blockEndToken);
+      };
+
       const handleProtocolPayload = (payload: unknown): boolean => {
         if (Array.isArray(payload)) {
           let handled = false;
@@ -596,12 +606,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       const closeAnyOpenBlocks = () => {
         if (insideThinking) {
-          emitAssistantText('\n\n</details>\n\n');
+          endStructuredBlock();
           insideThinking = false;
           this.view?.webview.postMessage({ type: 'thinkingEnd' });
         }
         if (insideAidaTool || insideToolResult || insideToolCall) {
-          emitAssistantText('\n```\n</details>\n\n');
+          endStructuredBlock();
           insideAidaTool = false;
           insideToolResult = false;
           if (insideToolCall) {
@@ -611,8 +621,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       };
 
+      // #region debug-point logger
+      const debugLog = (event: string, data: Record<string, unknown>) => {
+        try {
+          const fs = require('fs');
+          const logLine = JSON.stringify({ session: 'tool-call-nesting', ts: Date.now(), event, ...data }) + '\n';
+          fs.appendFileSync('/Users/bytedance/self-dev/jump/.dbg/trae-debug-log-tool-call-nesting.ndjson', logLine);
+        } catch { /* ignore */ }
+      };
+      // #endregion debug-point logger
+
       const processLine = (rawLine: string) => {
         let line = rawLine;
+
+        debugLog('processLine', { rawLine, insideThinking, insideToolCall, insideToolResult, insideAidaTool, headerDone });
 
         if (insideToolResult && (line.match(/^(?:>\s*)?╭─/) || line.match(/^(?:>\s*)?╰─/) || line.match(/^(?:>\s*)?\[Thinking\]/i) || line.match(/^(?:>\s*)?[*_]Thinking[*_]/i))) {
           closeAnyOpenBlocks();
@@ -622,7 +644,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (/^(?:>\s*)?[*_]Running[*_]$/i.test(line.trim())) {
           closeAnyOpenBlocks();
           insideAidaTool = true;
-          emitAssistantText('\n<details class="tool-details"><summary>🔧 Tool Execution</summary>\n\n```\n');
+          startStructuredBlock('tool', '🔧 Tool Execution');
           return;
         }
         if (/^(?:>\s*)?[*_](Completed|Failed)[*_]$/i.test(line.trim())) {
@@ -641,7 +663,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           closeAnyOpenBlocks();
           insideThinking = true;
           this.view?.webview.postMessage({ type: 'thinkingStart' });
-          emitAssistantText('\n<details class="thinking-details"><summary>Thinking...</summary>\n\n');
+          startStructuredBlock('thinking', 'Thinking...');
           return;
         }
         if (line.match(/^(?:>\s*)?╰─\s*done thinking/i) || line.includes('╰─ done thinking') || line.includes('╰─  done thinking')) {
@@ -662,6 +684,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           const afterDoneThinking = line.substring(idx + (match ? match[0].length : 15)).trim();
           if (afterDoneThinking) {
             line = afterDoneThinking;
+            // Let the rest of the function process the remainder of the line
           } else {
             return;
           }
@@ -677,6 +700,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // Skip header lines (mcp info, model info, assistant info)
         if (!headerDone) {
           if (line.match(/^(?:>\s*)?╭─\s*(mcp|assistant)/) || line.match(/^(?:>\s*)?\[.*\(search:/) || line.trim() === '') {
+            closeAnyOpenBlocks();
             return;
           }
           // Tool call start — let it fall through to tool processing below
@@ -688,7 +712,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '').trim();
             if (stripped.length > 0) {
               headerDone = true;
-              // fall through to content processing
+              // Let it fall through instead of skipping
             } else {
               return;
             }
@@ -708,11 +732,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             name = 'call_tools';
           }
           this.view?.webview.postMessage({ type: 'toolStart', name });
-          // Add a code block start to neatly display the tool call content
-          const safeName = name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          const codeBlockStart = '\n<details class="tool-details"><summary>🔧 Tool: ' + safeName + '</summary>\n\n```\n';
-          this.currentStreamingOutput += codeBlockStart;
-          this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockStart });
+          startStructuredBlock('tool', `🔧 Tool: ${name}`);
           return;
         }
         if (line.match(/^(?:>\s*)?╰─\s*(?:tool|call_tools?|call_tools)/i)) {
@@ -727,10 +747,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         if (/^(?:>\s*)?\[(Completed|Running|Failed)\]/i.test(trimmed)) {
+          closeAnyOpenBlocks();
           postStatus(trimmed.replace(/^(?:>\s*)?/, ''));
           return;
         }
         if (/^(?:>\s*)?\[[^\]]+\(search:\s*(true|false)\)\]$/i.test(trimmed)) {
+          closeAnyOpenBlocks();
           postStatus(trimmed.replace(/^(?:>\s*)?/, ''));
           return;
         }
@@ -738,15 +760,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           const thinkingText = trimmed.replace(/^(?:>\s*)?(\[Thinking\]|[*_]Thinking[*_])\s*/i, '').trim();
           if (thinkingText) {
             closeAnyOpenBlocks();
-            emitAssistantText('\n<details class="thinking-details"><summary>Thinking...</summary>\n\n' + thinkingText + '\n\n</details>\n\n');
+            startStructuredBlock('thinking', 'Thinking...');
+            emitAssistantText(thinkingText + '\n');
+            endStructuredBlock();
           }
           return;
         }
         // Ignore the 'output: streaming command output' prefix and 'is asking the same question again' log that Minimax might emit directly
-        if (/^(?:>\s*)?[│|]\s*output: streaming command output/i.test(trimmed)) {
+        if (/^(?:>\s*)?[│|]\s*output: (streaming command output|tool result)/i.test(trimmed)) {
           closeAnyOpenBlocks();
           insideToolResult = true;
-          emitAssistantText('\n<details class="tool-details"><summary>📄 Tool Output</summary>\n\n```\n');
+          startStructuredBlock('tool', '📄 Tool Output');
           return;
         }
 
@@ -756,9 +780,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
+        if (line.match(/^(?:>\s*)?╭─\s*(mcp|assistant)/)) {
+          closeAnyOpenBlocks();
+          return;
+        }
+
         // Skip more header/status lines after thinking
         if (line.match(/^(?:>\s*)?╭─/) || line.match(/^(?:>\s*)?╰─/)) {
-          return;
+          // Ignore tool/thinking boundaries here because we already processed them above.
+          // This prevents swallowing remaining lines incorrectly.
+          if (!insideToolResult && !insideThinking && !insideToolCall) {
+            return;
+          }
         }
 
         if (tryHandleProtocolLine(line)) {
@@ -819,11 +852,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         // Ensure any unclosed HTML details/codeblocks are closed
         if (insideThinking) {
-          emitAssistantText('\n\n</details>\n\n');
+          endStructuredBlock();
           insideThinking = false;
         }
         if (insideAidaTool || insideToolResult || insideToolCall) {
-          emitAssistantText('\n```\n</details>\n\n');
+          endStructuredBlock();
           insideAidaTool = false;
           insideToolResult = false;
           insideToolCall = false;
@@ -1138,6 +1171,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   .thinking-details > *:last-child, .tool-details > *:last-child {
     margin-bottom: 0;
+  }
+  .thinking-body {
+    white-space: pre-wrap;
+    line-height: 1.5;
+  }
+  .tool-details pre {
+    margin: 0;
   }
 
   /* Tool indicator */
@@ -1791,8 +1831,120 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  function parseAssistantSegments(rawText) {
+    const segments = [];
+    const lines = rawText.split('\\n');
+    let markdownLines = [];
+    let currentBlock = null;
+
+    function flushMarkdown() {
+      if (markdownLines.length === 0) {
+        return;
+      }
+      const text = markdownLines.join('\\n');
+      markdownLines = [];
+      if (!text.trim()) {
+        return;
+      }
+      segments.push({ type: 'markdown', text });
+    }
+
+    for (const line of lines) {
+      const blockMatch = line.match(/^\\[\\[JUMP_BLOCK_START\\|(thinking|tool)\\|(.+)\\]\\]$/);
+      if (blockMatch) {
+        flushMarkdown();
+        currentBlock = {
+          type: 'block',
+          blockType: blockMatch[1],
+          title: decodeURIComponent(blockMatch[2]),
+          lines: []
+        };
+        continue;
+      }
+
+      if (line === '[[JUMP_BLOCK_END]]') {
+        if (currentBlock) {
+          segments.push({
+            type: 'block',
+            blockType: currentBlock.blockType,
+            title: currentBlock.title,
+            text: currentBlock.lines.join('\\n'),
+            open: false
+          });
+          currentBlock = null;
+        }
+        continue;
+      }
+
+      if (currentBlock) {
+        currentBlock.lines.push(line);
+      } else {
+        markdownLines.push(line);
+      }
+    }
+
+    flushMarkdown();
+
+    if (currentBlock) {
+      segments.push({
+        type: 'block',
+        blockType: currentBlock.blockType,
+        title: currentBlock.title,
+        text: currentBlock.lines.join('\\n'),
+        open: true
+      });
+    }
+
+    return segments;
+  }
+
+  function createMarkdownSegment(text) {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = linkifyPaths(renderMarkdown(text));
+    return wrapper;
+  }
+
+  function createBlockSegment(segment) {
+    const details = document.createElement('details');
+    details.className = segment.blockType === 'thinking' ? 'thinking-details' : 'tool-details';
+    details.open = Boolean(segment.open);
+
+    const summary = document.createElement('summary');
+    summary.textContent = segment.title;
+    details.appendChild(summary);
+
+    const bodyText = segment.text.replace(/\\n+$/g, '');
+    if (segment.blockType === 'thinking') {
+      const body = document.createElement('div');
+      body.className = 'thinking-body';
+      body.textContent = bodyText;
+      details.appendChild(body);
+    } else {
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.textContent = bodyText;
+      pre.appendChild(code);
+      details.appendChild(pre);
+    }
+
+    return details;
+  }
+
   function renderAssistantContent(container, rawText) {
-    container.innerHTML = linkifyPaths(renderMarkdown(rawText));
+    container.innerHTML = '';
+    const segments = parseAssistantSegments(rawText);
+
+    if (segments.length === 0 && rawText.trim()) {
+      container.appendChild(createMarkdownSegment(rawText));
+    } else {
+      for (const segment of segments) {
+        if (segment.type === 'markdown') {
+          container.appendChild(createMarkdownSegment(segment.text));
+        } else {
+          container.appendChild(createBlockSegment(segment));
+        }
+      }
+    }
     upgradeCodeLanguages(container);
     upgradeMermaidBlocks(container);
     addCopyButtons(container);
