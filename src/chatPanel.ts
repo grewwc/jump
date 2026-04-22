@@ -637,21 +637,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         // Thinking markers anywhere
-        if (line.match(/^╭─\s*thinking/i) || line.trim().match(/^\[Thinking\]$/i) || line.trim().match(/^[*_]Thinking[*_]$/i)) {
+        if (line.match(/^╭─\s*thinking/i) || line.trim().match(/^\[Thinking\]$/i) || line.trim().match(/^[*_]Thinking[*_]$/i) || line.includes('╭─ thinking')) {
           closeAnyOpenBlocks();
           insideThinking = true;
           this.view?.webview.postMessage({ type: 'thinkingStart' });
           emitAssistantText('\n<details class="thinking-details"><summary>Thinking...</summary>\n\n');
           return;
         }
-        if (line.match(/^(?:>\s*)?╰─\s*done thinking/i)) {
-          const beforeDoneThinking = line.replace(/^(?:>\s*)?╰─\s*done thinking[\s\S]*$/ui, '').replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '').trim();
+        if (line.match(/^(?:>\s*)?╰─\s*done thinking/i) || line.includes('╰─ done thinking') || line.includes('╰─  done thinking')) {
+          const regex = /(?:>\s*)?╰─\s*done thinking/ui;
+          let match = line.match(regex);
+          if (!match) {
+            match = line.match(/╰─\s*done thinking/ui);
+          }
+          const idx = match ? match.index! : line.indexOf('done thinking') - 2;
+
+          const beforeDoneThinking = line.substring(0, Math.max(0, idx)).replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '').trim();
           if (beforeDoneThinking && insideThinking) {
             emitAssistantText(beforeDoneThinking + '\n');
           }
           closeAnyOpenBlocks();
           headerDone = true;
-          return;
+
+          const afterDoneThinking = line.substring(idx + (match ? match[0].length : 15)).trim();
+          if (afterDoneThinking) {
+            line = afterDoneThinking;
+          } else {
+            return;
+          }
         }
 
         // While inside a thinking block, emit content and return early
