@@ -591,9 +591,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       };
 
       let insideAidaTool = false;
+      let insideToolResult = false;
+      let insideToolCall = false;
 
       const processLine = (rawLine: string) => {
         let line = rawLine;
+
+        if (insideToolResult && (line.match(/^╭─/) || line.match(/^╰─/) || line.match(/^\[Thinking\]/i))) {
+          emitAssistantText('\n```\n</details>\n\n');
+          insideToolResult = false;
+        }
 
         // Aida agent specific tool call block (outputs to stderr usually)
         if (/^\*Running\*$/.test(line.trim())) {
@@ -667,6 +674,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // Tool call markers
         const toolMatch = line.match(/^╭─\s*(?:tool|call_tools?|call_tools)\s*·?\s*(.*)$/i);
         if (toolMatch) {
+          insideToolCall = true;
           let name = toolMatch[1].trim();
           if (/^(calls?)$/i.test(name)) {
             name = 'call_tools';
@@ -682,7 +690,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockStart });
           return;
         }
-        if (line.match(/^╰─\s*tool/)) {
+        if (line.match(/^╰─\s*(?:tool|call_tools?|call_tools)/i)) {
+          insideToolCall = false;
           this.view?.webview.postMessage({ type: 'toolEnd' });
           // Add a code block end
           const codeBlockEnd = '\n```\n</details>\n\n';
@@ -693,6 +702,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // Normalize and emit status flags as badges instead of mixing into assistant text
         const trimmed = line.trim();
         if (/^[│|]\s*result\s*:/i.test(trimmed)) {
+          if (insideToolResult) {
+            emitAssistantText('\n```\n</details>\n\n');
+            insideToolResult = false;
+          }
           postStatus(trimmed.replace(/^[│|]\s*/u, ''));
           return;
         }
@@ -713,6 +726,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         // Ignore the 'output: streaming command output' prefix and 'is asking the same question again' log that Minimax might emit directly
         if (/^[│|]\s*output: streaming command output/i.test(trimmed)) {
+          if (insideToolCall) {
+            emitAssistantText('\n```\n</details>\n\n');
+            insideToolCall = false;
+          }
+          insideToolResult = true;
+          emitAssistantText('\n<details class="tool-details"><summary>📄 Tool Output</summary>\n\n```\n');
+          return;
+        }
+
+        if (insideToolResult) {
+          const stripped = line.replace(/^\s*[│|]\s?/, '');
+          emitAssistantText(stripped + '\n');
           return;
         }
 
@@ -776,6 +801,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           processLine(stderrBuffer);
           stderrBuffer = '';
         }
+
+        // Ensure any unclosed HTML details/codeblocks are closed
+        if (insideThinking) {
+          emitAssistantText('\n\n</details>\n\n');
+          insideThinking = false;
+        }
+        if (insideAidaTool || insideToolResult || insideToolCall) {
+          emitAssistantText('\n```\n</details>\n\n');
+          insideAidaTool = false;
+          insideToolResult = false;
+          insideToolCall = false;
+        }
+
         const content = this.currentStreamingOutput.trim();
         if (content) {
           const current = this.getCurrentSession();
