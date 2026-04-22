@@ -594,74 +594,85 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let insideToolResult = false;
       let insideToolCall = false;
 
+      const closeAnyOpenBlocks = () => {
+        if (insideThinking) {
+          emitAssistantText('\n\n</details>\n\n');
+          insideThinking = false;
+          this.view?.webview.postMessage({ type: 'thinkingEnd' });
+        }
+        if (insideAidaTool || insideToolResult || insideToolCall) {
+          emitAssistantText('\n```\n</details>\n\n');
+          insideAidaTool = false;
+          insideToolResult = false;
+          if (insideToolCall) {
+            this.view?.webview.postMessage({ type: 'toolEnd' });
+            insideToolCall = false;
+          }
+        }
+      };
+
       const processLine = (rawLine: string) => {
         let line = rawLine;
 
-        if (insideToolResult && (line.match(/^╭─/) || line.match(/^╰─/) || line.match(/^\[Thinking\]/i))) {
-          emitAssistantText('\n```\n</details>\n\n');
-          insideToolResult = false;
+        if (insideToolResult && (line.match(/^(?:>\s*)?╭─/) || line.match(/^(?:>\s*)?╰─/) || line.match(/^(?:>\s*)?\[Thinking\]/i) || line.match(/^(?:>\s*)?[*_]Thinking[*_]/i))) {
+          closeAnyOpenBlocks();
         }
 
         // Aida agent specific tool call block (outputs to stderr usually)
-        if (/^\*Running\*$/.test(line.trim())) {
+        if (/^(?:>\s*)?[*_]Running[*_]$/i.test(line.trim())) {
+          closeAnyOpenBlocks();
           insideAidaTool = true;
           emitAssistantText('\n<details class="tool-details"><summary>🔧 Tool Execution</summary>\n\n```\n');
           return;
         }
-        if (/^\*(Completed|Failed)\*$/.test(line.trim())) {
-          if (insideAidaTool) {
-            emitAssistantText('\n```\n</details>\n\n');
-            insideAidaTool = false;
-          }
+        if (/^(?:>\s*)?[*_](Completed|Failed)[*_]$/i.test(line.trim())) {
+          closeAnyOpenBlocks();
           return;
         }
         if (insideAidaTool) {
           // Keep the raw text but strip leading `| ` if present, to show cleanly in the code block
-          const stripped = line.replace(/^\s*[│|]\s?/, '');
+          const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '');
           emitAssistantText(stripped + '\n');
           return;
         }
 
         // Thinking markers anywhere
-        if (line.match(/╭─\s*thinking/)) {
+        if (line.match(/^╭─\s*thinking/i) || line.trim().match(/^\[Thinking\]$/i) || line.trim().match(/^[*_]Thinking[*_]$/i)) {
+          closeAnyOpenBlocks();
           insideThinking = true;
           this.view?.webview.postMessage({ type: 'thinkingStart' });
           emitAssistantText('\n<details class="thinking-details"><summary>Thinking...</summary>\n\n');
           return;
         }
-        if (line.match(/╰─\s*done thinking/)) {
-          if (insideThinking) {
-            const beforeDoneThinking = line.replace(/╰─\s*done thinking[\s\S]*$/u, '').replace(/^\s*[│|]\s?/, '').trim();
-            if (beforeDoneThinking) {
-              emitAssistantText(beforeDoneThinking + '\n');
-            }
-            emitAssistantText('\n\n</details>\n\n');
+        if (line.match(/^(?:>\s*)?╰─\s*done thinking/i)) {
+          const beforeDoneThinking = line.replace(/^(?:>\s*)?╰─\s*done thinking[\s\S]*$/ui, '').replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '').trim();
+          if (beforeDoneThinking && insideThinking) {
+            emitAssistantText(beforeDoneThinking + '\n');
           }
-          insideThinking = false;
-          this.view?.webview.postMessage({ type: 'thinkingEnd' });
+          closeAnyOpenBlocks();
           headerDone = true;
           return;
         }
 
         // While inside a thinking block, emit content and return early
         if (insideThinking) {
-          const stripped = line.replace(/^\s*[│|]\s?/, '');
+          const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '');
           emitAssistantText(stripped + '\n');
           return;
         }
 
         // Skip header lines (mcp info, model info, assistant info)
         if (!headerDone) {
-          if (line.match(/^╭─\s*(mcp|assistant)/) || line.match(/^\[.*\(search:/) || line.trim() === '') {
+          if (line.match(/^(?:>\s*)?╭─\s*(mcp|assistant)/) || line.match(/^(?:>\s*)?\[.*\(search:/) || line.trim() === '') {
             return;
           }
           // Tool call start — let it fall through to tool processing below
-          if (line.match(/^╭─\s*(?:tool|call_tools?|call_tools)\s*·?\s*(.*)$/i)) {
+          if (line.match(/^(?:>\s*)?╭─\s*(?:tool|call_tools?|call_tools)\s*·?\s*(.*)$/i)) {
             headerDone = true;
             // fall through
           } else {
             // If the line has actual content (not a known header), start emitting
-            const stripped = line.replace(/^\s*[│|]\s?/, '').trim();
+            const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '').trim();
             if (stripped.length > 0) {
               headerDone = true;
               // fall through to content processing
@@ -672,8 +683,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         // Tool call markers
-        const toolMatch = line.match(/^╭─\s*(?:tool|call_tools?|call_tools)\s*·?\s*(.*)$/i);
+        const toolMatch = line.match(/^(?:>\s*)?╭─\s*(?:tool|call_tools?|call_tools)\s*·?\s*(.*)$/i);
         if (toolMatch) {
+          closeAnyOpenBlocks();
           insideToolCall = true;
           let name = toolMatch[1].trim();
           if (/^(calls?)$/i.test(name)) {
@@ -690,59 +702,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockStart });
           return;
         }
-        if (line.match(/^╰─\s*(?:tool|call_tools?|call_tools)/i)) {
-          insideToolCall = false;
-          this.view?.webview.postMessage({ type: 'toolEnd' });
-          // Add a code block end
-          const codeBlockEnd = '\n```\n</details>\n\n';
-          this.currentStreamingOutput += codeBlockEnd;
-          this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockEnd });
+        if (line.match(/^(?:>\s*)?╰─\s*(?:tool|call_tools?|call_tools)/i)) {
+          closeAnyOpenBlocks();
           return;
         }
         // Normalize and emit status flags as badges instead of mixing into assistant text
         const trimmed = line.trim();
-        if (/^[│|]\s*result\s*:/i.test(trimmed)) {
-          if (insideToolResult) {
-            emitAssistantText('\n```\n</details>\n\n');
-            insideToolResult = false;
-          }
-          postStatus(trimmed.replace(/^[│|]\s*/u, ''));
+        if (/^(?:>\s*)?[│|]\s*result\s*:/i.test(trimmed)) {
+          closeAnyOpenBlocks();
+          postStatus(trimmed.replace(/^(?:>\s*)?[│|]\s*/u, ''));
           return;
         }
-        if (/^\[(Completed|Running|Failed)\]/i.test(trimmed)) {
-          postStatus(trimmed);
+        if (/^(?:>\s*)?\[(Completed|Running|Failed)\]/i.test(trimmed)) {
+          postStatus(trimmed.replace(/^(?:>\s*)?/, ''));
           return;
         }
-        if (/^\[[^\]]+\(search:\s*(true|false)\)\]$/i.test(trimmed)) {
-          postStatus(trimmed);
+        if (/^(?:>\s*)?\[[^\]]+\(search:\s*(true|false)\)\]$/i.test(trimmed)) {
+          postStatus(trimmed.replace(/^(?:>\s*)?/, ''));
           return;
         }
-        if (/^\[Thinking\]\s*/i.test(trimmed)) {
-          const thinkingText = trimmed.replace(/^\[Thinking\]\s*/i, '').trim();
+        if (/^(?:>\s*)?(\[Thinking\]|[*_]Thinking[*_])\s*/i.test(trimmed)) {
+          const thinkingText = trimmed.replace(/^(?:>\s*)?(\[Thinking\]|[*_]Thinking[*_])\s*/i, '').trim();
           if (thinkingText) {
+            closeAnyOpenBlocks();
             emitAssistantText('\n<details class="thinking-details"><summary>Thinking...</summary>\n\n' + thinkingText + '\n\n</details>\n\n');
           }
           return;
         }
         // Ignore the 'output: streaming command output' prefix and 'is asking the same question again' log that Minimax might emit directly
-        if (/^[│|]\s*output: streaming command output/i.test(trimmed)) {
-          if (insideToolCall) {
-            emitAssistantText('\n```\n</details>\n\n');
-            insideToolCall = false;
-          }
+        if (/^(?:>\s*)?[│|]\s*output: streaming command output/i.test(trimmed)) {
+          closeAnyOpenBlocks();
           insideToolResult = true;
           emitAssistantText('\n<details class="tool-details"><summary>📄 Tool Output</summary>\n\n```\n');
           return;
         }
 
         if (insideToolResult) {
-          const stripped = line.replace(/^\s*[│|]\s?/, '');
+          const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '');
           emitAssistantText(stripped + '\n');
           return;
         }
 
         // Skip more header/status lines after thinking
-        if (line.match(/^╭─/) || line.match(/^╰─/)) {
+        if (line.match(/^(?:>\s*)?╭─/) || line.match(/^(?:>\s*)?╰─/)) {
           return;
         }
 
@@ -755,7 +757,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         // Actual content – strip leading box-drawing bars (may have leading whitespace)
-        line = line.replace(/^\s*[│|]\s?/, '');
+        line = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '');
         emitAssistantText(line + '\n');
       };
 
