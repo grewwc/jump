@@ -476,25 +476,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage({ type: 'startResponse' });
 
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.env.HOME ?? '/';
-    // #region debug-point A:debug-reporter
-    const debugServerUrl = 'http://127.0.0.1:7777/event';
-    const debugSessionId = 'chatbox-cross-domain';
-    const reportDebug = (hypothesisId: string, location: string, msg: string, data: Record<string, unknown> = {}) => {
-      globalThis.fetch?.(debugServerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: debugSessionId,
-          runId: 'pre-fix',
-          hypothesisId,
-          location,
-          msg: `[DEBUG] ${msg}`,
-          data,
-          ts: Date.now(),
-        }),
-      }).catch(() => { });
-    };
-    // #endregion
 
     this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
 
@@ -547,13 +528,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (!textChunk) {
           return;
         }
-        // #region debug-point B:emit-assistant-text
-        reportDebug('B', 'src/chatPanel.ts:emitAssistantText', 'emitAssistantText', {
-          preview: textChunk.slice(0, 240),
-          containsCrossDomain: /cross-domain link discovered/i.test(textChunk),
-          containsThinkingTag: /thinking/i.test(textChunk),
-        });
-        // #endregion
         this.currentStreamingOutput += textChunk;
         this.view?.webview.postMessage({ type: 'streamChunk', text: textChunk });
       };
@@ -620,16 +594,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       const processLine = (rawLine: string) => {
         let line = rawLine;
-        // #region debug-point E:process-line
-        if (line.trim()) {
-          reportDebug('E', 'src/chatPanel.ts:processLine', 'processLine enter', {
-            rawLine: line.slice(0, 300),
-            headerDone,
-            insideThinking,
-            insideAidaTool,
-          });
-        }
-        // #endregion
 
         // Aida agent specific tool call block (outputs to stderr usually)
         if (/^\*Running\*$/.test(line.trim())) {
@@ -798,14 +762,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
 
       child.stderr?.on('data', (data: Buffer) => {
-        // #region debug-point C:stderr-chunk
-        const stderrText = data.toString();
-        reportDebug('C', 'src/chatPanel.ts:child.stderr', 'stderr chunk', {
-          preview: stderrText.slice(0, 300),
-          containsCrossDomain: /cross-domain link discovered/i.test(stderrText),
-          containsThinkingTag: /thinking/i.test(stderrText),
-        });
-        // #endregion
         processChunk(data.toString(), true);
       });
 
@@ -1464,34 +1420,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </script>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
-  // #region debug-point D:webview-reporter
-  const DEBUG_SERVER_URL = 'http://127.0.0.1:7777/event';
-  const DEBUG_SESSION_ID = 'chatbox-cross-domain';
-  function reportWebviewDebug(hypothesisId, location, msg, data) {
-    fetch(DEBUG_SERVER_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: DEBUG_SESSION_ID,
-        runId: 'pre-fix',
-        hypothesisId,
-        location,
-        msg: '[DEBUG] ' + msg,
-        data: data || {},
-        ts: Date.now()
-      })
-    }).catch(function() {});
-  }
-  // #endregion
   window.addEventListener('error', (event) => {
-    // #region debug-point D:webview-error
-    reportWebviewDebug('D', 'src/chatPanel.ts:window.error', 'window error', {
-      message: event.message,
-      filename: event.filename,
-      lineno: event.lineno,
-      colno: event.colno
-    });
-    // #endregion
     vscode.postMessage({ type: 'errorMessage', text: 'Webview Script Error: ' + event.message + '\\nSource: ' + event.filename });
   });
 
@@ -1810,16 +1739,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   function renderAssistantContent(container, rawText) {
-    // #region debug-point D:render-assistant
-    if (/cross-domain link discovered/i.test(rawText) || /<details class="thinking-details">/i.test(rawText) || /<details class="tool-details">/i.test(rawText)) {
-      reportWebviewDebug('D', 'src/chatPanel.ts:renderAssistantContent', 'renderAssistantContent suspicious rawText', {
-        preview: rawText.slice(0, 400),
-        containsCrossDomain: /cross-domain link discovered/i.test(rawText),
-        containsThinkingDetails: /<details class="thinking-details">/i.test(rawText),
-        containsToolDetails: /<details class="tool-details">/i.test(rawText)
-      });
-    }
-    // #endregion
     container.innerHTML = linkifyPaths(renderMarkdown(rawText));
     upgradeCodeLanguages(container);
     upgradeMermaidBlocks(container);
@@ -1876,17 +1795,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   function appendToAssistant(text) {
     if (!currentAssistantEl) startAssistantMessage();
-    // #region debug-point D:append-to-assistant
-    if (/cross-domain link discovered/i.test(text) || /thinking/i.test(text) || /<details class="thinking-details">/i.test(text) || /<details class="tool-details">/i.test(text)) {
-      reportWebviewDebug('D', 'src/chatPanel.ts:appendToAssistant', 'appendToAssistant suspicious text', {
-        preview: text.slice(0, 300),
-        containsCrossDomain: /cross-domain link discovered/i.test(text),
-        containsThinking: /thinking/i.test(text),
-        containsThinkingDetails: /<details class="thinking-details">/i.test(text),
-        containsToolDetails: /<details class="tool-details">/i.test(text)
-      });
-    }
-    // #endregion
     currentAssistantRaw += text;
     if (!renderPending) {
       renderPending = true;
