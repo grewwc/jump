@@ -127,6 +127,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (confirmed !== 'Delete') {
       return;
     }
+
+    try {
+      this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
+      const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.env.HOME ?? '/';
+      cp.execFile(this.agentBinary, ['/sessions', 'delete', current.id], { cwd, env: { ...process.env } }, (error) => {
+        if (error) {
+          console.error(`Failed to delete session on backend: ${error.message}`);
+        }
+      });
+    } catch (e) {
+      console.error(`Failed to spawn backend delete session command: ${e}`);
+    }
+
     this.sessions = this.sessions.filter((s) => s.id !== current.id);
     this.sessionId = this.sessions[0].id;
     this.currentSelection = null;
@@ -463,6 +476,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage({ type: 'startResponse' });
 
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.env.HOME ?? '/';
+    // #region debug-point A:debug-reporter
+    const debugServerUrl = 'http://127.0.0.1:7777/event';
+    const debugSessionId = 'chatbox-cross-domain';
+    const reportDebug = (hypothesisId: string, location: string, msg: string, data: Record<string, unknown> = {}) => {
+      globalThis.fetch?.(debugServerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: debugSessionId,
+          runId: 'pre-fix',
+          hypothesisId,
+          location,
+          msg: `[DEBUG] ${msg}`,
+          data,
+          ts: Date.now(),
+        }),
+      }).catch(() => { });
+    };
+    // #endregion
 
     this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
 
@@ -505,6 +537,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let headerDone = false;
       let insideThinking = false;
       let stdoutBuffer = '';
+      let stderrBuffer = '';
 
       const postStatus = (label: string) => {
         this.view?.webview.postMessage({ type: 'statusFlag', label });
@@ -514,6 +547,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (!textChunk) {
           return;
         }
+        // #region debug-point B:emit-assistant-text
+        reportDebug('B', 'src/chatPanel.ts:emitAssistantText', 'emitAssistantText', {
+          preview: textChunk.slice(0, 240),
+          containsCrossDomain: /cross-domain link discovered/i.test(textChunk),
+          containsThinkingTag: /thinking/i.test(textChunk),
+        });
+        // #endregion
         this.currentStreamingOutput += textChunk;
         this.view?.webview.postMessage({ type: 'streamChunk', text: textChunk });
       };
@@ -576,8 +616,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       };
 
+      let insideAidaTool = false;
+
       const processLine = (rawLine: string) => {
         let line = rawLine;
+        // #region debug-point E:process-line
+        if (line.trim()) {
+          reportDebug('E', 'src/chatPanel.ts:processLine', 'processLine enter', {
+            rawLine: line.slice(0, 300),
+            headerDone,
+            insideThinking,
+            insideAidaTool,
+          });
+        }
+        // #endregion
+
+        // Aida agent specific tool call block (outputs to stderr usually)
+        if (/^\*Running\*$/.test(line.trim())) {
+          insideAidaTool = true;
+          emitAssistantText('\n<details class="tool-details"><summary>🔧 Tool Execution</summary>\n\n```\n');
+          return;
+        }
+        if (/^\*(Completed|Failed)\*$/.test(line.trim())) {
+          if (insideAidaTool) {
+            emitAssistantText('\n```\n</details>\n\n');
+            insideAidaTool = false;
+          }
+          return;
+        }
+        if (insideAidaTool) {
+          // Keep the raw text but strip leading `| ` if present, to show cleanly in the code block
+          const stripped = line.replace(/^\s*[│|]\s?/, '');
+          emitAssistantText(stripped + '\n');
+          return;
+        }
 
         // Thinking markers anywhere
         if (line.match(/╭─\s*thinking/)) {
@@ -588,6 +660,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         if (line.match(/╰─\s*done thinking/)) {
           if (insideThinking) {
+            const beforeDoneThinking = line.replace(/╰─\s*done thinking[\s\S]*$/u, '').replace(/^\s*[│|]\s?/, '').trim();
+            if (beforeDoneThinking) {
+              emitAssistantText(beforeDoneThinking + '\n');
+            }
             emitAssistantText('\n\n</details>\n\n');
           }
           insideThinking = false;
@@ -636,7 +712,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }
           this.view?.webview.postMessage({ type: 'toolStart', name });
           // Add a code block start to neatly display the tool call content
-          const codeBlockStart = '```\n';
+          const safeName = name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          const codeBlockStart = '\n<details class="tool-details"><summary>🔧 Tool: ' + safeName + '</summary>\n\n```\n';
           this.currentStreamingOutput += codeBlockStart;
           this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockStart });
           return;
@@ -644,7 +721,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (line.match(/^╰─\s*tool/)) {
           this.view?.webview.postMessage({ type: 'toolEnd' });
           // Add a code block end
-          const codeBlockEnd = '\n```\n';
+          const codeBlockEnd = '\n```\n</details>\n\n';
           this.currentStreamingOutput += codeBlockEnd;
           this.view?.webview.postMessage({ type: 'streamChunk', text: codeBlockEnd });
           return;
@@ -661,6 +738,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         if (/^\[[^\]]+\(search:\s*(true|false)\)\]$/i.test(trimmed)) {
           postStatus(trimmed);
+          return;
+        }
+        if (/^\[Thinking\]\s*/i.test(trimmed)) {
+          const thinkingText = trimmed.replace(/^\[Thinking\]\s*/i, '').trim();
+          if (thinkingText) {
+            emitAssistantText('\n<details class="thinking-details"><summary>Thinking...</summary>\n\n' + thinkingText + '\n\n</details>\n\n');
+          }
           return;
         }
         // Ignore the 'output: streaming command output' prefix and 'is asking the same question again' log that Minimax might emit directly
@@ -686,30 +770,43 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         emitAssistantText(line + '\n');
       };
 
-      const processChunk = (raw: string) => {
+      const processChunk = (raw: string, isStderr = false) => {
         const clean = stripAnsi(raw);
-        stdoutBuffer += clean;
-
-        let newlineIndex = stdoutBuffer.indexOf('\n');
-        while (newlineIndex !== -1) {
-          const line = stdoutBuffer.slice(0, newlineIndex);
-          stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-          processLine(line);
-          newlineIndex = stdoutBuffer.indexOf('\n');
+        if (isStderr) {
+          stderrBuffer += clean;
+          let newlineIndex = stderrBuffer.indexOf('\n');
+          while (newlineIndex !== -1) {
+            const line = stderrBuffer.slice(0, newlineIndex);
+            stderrBuffer = stderrBuffer.slice(newlineIndex + 1);
+            processLine(line);
+            newlineIndex = stderrBuffer.indexOf('\n');
+          }
+        } else {
+          stdoutBuffer += clean;
+          let newlineIndex = stdoutBuffer.indexOf('\n');
+          while (newlineIndex !== -1) {
+            const line = stdoutBuffer.slice(0, newlineIndex);
+            stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+            processLine(line);
+            newlineIndex = stdoutBuffer.indexOf('\n');
+          }
         }
       };
 
       child.stdout?.on('data', (data: Buffer) => {
-        processChunk(data.toString());
+        processChunk(data.toString(), false);
       });
 
       child.stderr?.on('data', (data: Buffer) => {
-        // Surface stderr text so launch/runtime failures are visible in panel.
-        const text = data.toString();
-        const clean = stripAnsi(text);
-        if (clean.trim().length > 0) {
-          this.view?.webview.postMessage({ type: 'streamChunk', text: clean });
-        }
+        // #region debug-point C:stderr-chunk
+        const stderrText = data.toString();
+        reportDebug('C', 'src/chatPanel.ts:child.stderr', 'stderr chunk', {
+          preview: stderrText.slice(0, 300),
+          containsCrossDomain: /cross-domain link discovered/i.test(stderrText),
+          containsThinkingTag: /thinking/i.test(stderrText),
+        });
+        // #endregion
+        processChunk(data.toString(), true);
       });
 
       child.on('close', () => {
@@ -718,6 +815,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (stdoutBuffer.trim().length > 0) {
           processLine(stdoutBuffer);
           stdoutBuffer = '';
+        }
+        if (stderrBuffer.trim().length > 0) {
+          processLine(stderrBuffer);
+          stderrBuffer = '';
         }
         const content = this.currentStreamingOutput.trim();
         if (content) {
@@ -1000,7 +1101,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     100% { content: ''; }
   }
 
-  .thinking-details {
+  .thinking-details, .tool-details {
     margin: 8px 0;
     padding: 8px 12px;
     border-left: 3px solid var(--vscode-editorInfo-foreground, #3794ff);
@@ -1009,17 +1110,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     font-size: 0.95em;
     color: var(--vscode-descriptionForeground);
   }
-  .thinking-details summary {
+  .tool-details {
+    border-left-color: var(--vscode-editorWarning-foreground, #cca700);
+    background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 10%, transparent);
+  }
+  .thinking-details summary, .tool-details summary {
     cursor: pointer;
     font-weight: 600;
     margin-bottom: 4px;
     user-select: none;
     color: var(--vscode-editorInfo-foreground, #3794ff);
   }
-  .thinking-details[open] summary {
+  .tool-details summary {
+    color: var(--vscode-editorWarning-foreground, #cca700);
+  }
+  .thinking-details[open] summary, .tool-details[open] summary {
     margin-bottom: 8px;
   }
-  .thinking-details > *:last-child {
+  .thinking-details > *:last-child, .tool-details > *:last-child {
     margin-bottom: 0;
   }
 
@@ -1356,7 +1464,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </script>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
+  // #region debug-point D:webview-reporter
+  const DEBUG_SERVER_URL = 'http://127.0.0.1:7777/event';
+  const DEBUG_SESSION_ID = 'chatbox-cross-domain';
+  function reportWebviewDebug(hypothesisId, location, msg, data) {
+    fetch(DEBUG_SERVER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: DEBUG_SESSION_ID,
+        runId: 'pre-fix',
+        hypothesisId,
+        location,
+        msg: '[DEBUG] ' + msg,
+        data: data || {},
+        ts: Date.now()
+      })
+    }).catch(function() {});
+  }
+  // #endregion
   window.addEventListener('error', (event) => {
+    // #region debug-point D:webview-error
+    reportWebviewDebug('D', 'src/chatPanel.ts:window.error', 'window error', {
+      message: event.message,
+      filename: event.filename,
+      lineno: event.lineno,
+      colno: event.colno
+    });
+    // #endregion
     vscode.postMessage({ type: 'errorMessage', text: 'Webview Script Error: ' + event.message + '\\nSource: ' + event.filename });
   });
 
@@ -1675,6 +1810,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   function renderAssistantContent(container, rawText) {
+    // #region debug-point D:render-assistant
+    if (/cross-domain link discovered/i.test(rawText) || /<details class="thinking-details">/i.test(rawText) || /<details class="tool-details">/i.test(rawText)) {
+      reportWebviewDebug('D', 'src/chatPanel.ts:renderAssistantContent', 'renderAssistantContent suspicious rawText', {
+        preview: rawText.slice(0, 400),
+        containsCrossDomain: /cross-domain link discovered/i.test(rawText),
+        containsThinkingDetails: /<details class="thinking-details">/i.test(rawText),
+        containsToolDetails: /<details class="tool-details">/i.test(rawText)
+      });
+    }
+    // #endregion
     container.innerHTML = linkifyPaths(renderMarkdown(rawText));
     upgradeCodeLanguages(container);
     upgradeMermaidBlocks(container);
@@ -1731,6 +1876,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   function appendToAssistant(text) {
     if (!currentAssistantEl) startAssistantMessage();
+    // #region debug-point D:append-to-assistant
+    if (/cross-domain link discovered/i.test(text) || /thinking/i.test(text) || /<details class="thinking-details">/i.test(text) || /<details class="tool-details">/i.test(text)) {
+      reportWebviewDebug('D', 'src/chatPanel.ts:appendToAssistant', 'appendToAssistant suspicious text', {
+        preview: text.slice(0, 300),
+        containsCrossDomain: /cross-domain link discovered/i.test(text),
+        containsThinking: /thinking/i.test(text),
+        containsThinkingDetails: /<details class="thinking-details">/i.test(text),
+        containsToolDetails: /<details class="tool-details">/i.test(text)
+      });
+    }
+    // #endregion
     currentAssistantRaw += text;
     if (!renderPending) {
       renderPending = true;
@@ -2000,17 +2156,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         startAssistantMessage();
         break;
       case 'thinkingStart': {
-        const el = document.createElement('div');
-        el.className = 'thinking-indicator';
-        el.id = 'thinking';
-        el.textContent = 'Thinking';
-        messagesEl.appendChild(el);
-        scrollToBottom();
+        // Do not inject the floating Thinking... indicator anymore,
+        // because we are rendering the actual thinking content now inside details.
         break;
       }
       case 'thinkingEnd': {
-        const el = document.getElementById('thinking');
-        if (el) el.remove();
         break;
       }
       case 'toolStart': {
