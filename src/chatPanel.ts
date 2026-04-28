@@ -1618,14 +1618,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return lines.join('\\n');
     }
 
-    const fixedText = fixMarkdownTables(text);
+    let fixedText = fixMarkdownTables(text);
+
+    // Handle incomplete code blocks: if there's an unclosed fence,
+    // close it so marked doesn't truncate output during streaming.
+    const fenceStr = String.fromCharCode(96) + String.fromCharCode(96) + String.fromCharCode(96);
+    const count = (fixedText.split(fenceStr).length - 1);
+    if (count % 2 === 1) {
+      fixedText += '\\n' + fenceStr;
+    }
 
     if (typeof marked !== 'undefined') {
-      return marked.parse(fixedText, {
-        gfm: true,
-        breaks: true,
-        async: false
-      });
+      try {
+        return marked.parse(fixedText, {
+          gfm: true,
+          breaks: true,
+          async: false
+        });
+      } catch (e) {
+        console.error('marked.parse failed:', e);
+        let html = escapeHtml(fixedText);
+        html = html.replace(/\\n/g, '<br>');
+        return html;
+      }
     }
     // Very simple fallback if marked fails to load
     let html = escapeHtml(fixedText);
@@ -1987,8 +2002,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     scrollToBottom();
   }
 
-  // Throttled rendering: accumulate text, render at most once per animation frame
+  // Throttled rendering: accumulate text, render at most once per 30ms to prevent lag
   let renderPending = false;
+  let lastRenderTime = 0;
 
   function flushAssistantRender() {
     if (!currentAssistantContentEl) {
@@ -1996,6 +2012,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     renderAssistantContent(currentAssistantContentEl, currentAssistantRaw);
     scrollToBottom();
+    lastRenderTime = Date.now();
   }
 
   function appendToAssistant(text) {
@@ -2003,10 +2020,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     currentAssistantRaw += text;
     if (!renderPending) {
       renderPending = true;
-      requestAnimationFrame(function() {
-        renderPending = false;
+      // Schedule re-render in 30ms, or immediately if we haven't rendered in a while
+      const timeSinceLastRender = Date.now() - lastRenderTime;
+      const scheduleDelay = timeSinceLastRender > 30 ? 0 : 30;
+      
+      if (scheduleDelay === 0) {
         flushAssistantRender();
-      });
+        renderPending = false;
+      } else {
+        setTimeout(function() {
+          renderPending = false;
+          flushAssistantRender();
+        }, scheduleDelay);
+      }
     }
   }
 
