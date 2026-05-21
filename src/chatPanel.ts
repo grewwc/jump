@@ -1572,18 +1572,70 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Let's try to fix them before passing to marked.
     function fixMarkdownTables(txt) {
       const lines = txt.split('\\n');
+      const backtick = String.fromCharCode(96);
+      const fenceBacktick = backtick + backtick + backtick;
+      const fenceTilde = '~~~';
+
+      const fenceToken = (l) => {
+        const trimmed = l.trimStart();
+        if (trimmed.startsWith(fenceBacktick)) return fenceBacktick;
+        if (trimmed.startsWith(fenceTilde)) return fenceTilde;
+        return '';
+      };
+
+      const normalizePipeLikes = (l) => {
+        const pipeLikeCount = (l.match(/[|｜]/g) || []).length;
+        if (pipeLikeCount >= 2) {
+          return l.replace(/｜/g, '|');
+        }
+        return l;
+      };
+
+      const normalizeDashes = (l) => l.replace(/[—–−－﹣]/g, '-');
+      const countCols = (l) => l.replace(/^\\|/, '').replace(/\\|$/, '').split('|').length;
+
+      let fence = '';
+      for (let i = 0; i < lines.length; i++) {
+        const tok = fenceToken(lines[i]);
+        if (tok) {
+          if (!fence) {
+            fence = tok;
+          } else if (fence === tok) {
+            fence = '';
+          }
+          continue;
+        }
+        if (fence) {
+          continue;
+        }
+        lines[i] = normalizePipeLikes(lines[i]);
+      }
+
+      fence = '';
       for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        // Match a table delimiter row like ---|---|--- or |---|---|---|
-        if (/^\\|? *[:-]+ *\\| *[:-]+ *(?:\\| *[:-]+ *)*\\|?$/.test(line)) {
-          const headerLine = lines[i - 1].trim();
+        const tok = fenceToken(lines[i]);
+        if (tok) {
+          if (!fence) {
+            fence = tok;
+          } else if (fence === tok) {
+            fence = '';
+          }
+          continue;
+        }
+        if (fence) {
+          continue;
+        }
+
+        const normalizedDelimLine = normalizeDashes(lines[i].trim());
+        if (/^\\|? *[:-]+ *\\| *[:-]+ *(?:\\| *[:-]+ *)*\\|?$/.test(normalizedDelimLine)) {
+          const headerLine = normalizePipeLikes(lines[i - 1]).trim();
           if (!headerLine.includes('|')) continue;
-          
-          const countCols = (l) => l.replace(/^\\|/, '').replace(/\\|$/, '').split('|').length;
-          
-          const delimCols = countCols(line);
+
+          lines[i] = normalizeDashes(lines[i]);
+
+          const delimCols = countCols(normalizeDashes(lines[i].trim()));
           const headerCols = countCols(headerLine);
-          
+
           if (headerCols < delimCols) {
             const diff = delimCols - headerCols;
             let newHeader = headerLine;
@@ -1594,22 +1646,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             lines[i - 1] = newHeader;
           } else if (delimCols < headerCols) {
             const diff = headerCols - delimCols;
-            let newDelim = line;
+            let newDelim = normalizeDashes(lines[i].trim());
             if (newDelim.endsWith('|')) {
               newDelim = newDelim.substring(0, newDelim.length - 1);
             }
             newDelim = newDelim + '|---'.repeat(diff) + '|';
             lines[i] = newDelim;
           }
-          
+
           if (!lines[i].trim().startsWith('|')) {
             lines[i] = '| ' + lines[i].trim();
           }
-          
+
           for (let j = i + 1; j < lines.length; j++) {
-            const dataLine = lines[j].trim();
-            if (dataLine === '' || !dataLine.includes('|')) break; // End of table
-            if (!dataLine.startsWith('|')) {
+            const dataLine = normalizePipeLikes(lines[j]).trim();
+            if (dataLine === '' || !dataLine.includes('|')) break;
+            lines[j] = normalizePipeLikes(lines[j]);
+            if (!lines[j].trim().startsWith('|')) {
               lines[j] = '| ' + lines[j].trim();
             }
           }
@@ -1618,747 +1671,747 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return lines.join('\\n');
     }
 
-    let fixedText = fixMarkdownTables(text);
+let fixedText = fixMarkdownTables(text);
 
-    // Handle incomplete code blocks: if there's an unclosed fence,
-    // close it so marked doesn't truncate output during streaming.
-    const fenceStr = String.fromCharCode(96) + String.fromCharCode(96) + String.fromCharCode(96);
-    const count = (fixedText.split(fenceStr).length - 1);
-    if (count % 2 === 1) {
-      fixedText += '\\n' + fenceStr;
-    }
+// Handle incomplete code blocks: if there's an unclosed fence,
+// close it so marked doesn't truncate output during streaming.
+const fenceStr = String.fromCharCode(96) + String.fromCharCode(96) + String.fromCharCode(96);
+const count = (fixedText.split(fenceStr).length - 1);
+if (count % 2 === 1) {
+  fixedText += '\\n' + fenceStr;
+}
 
-    if (typeof marked !== 'undefined') {
-      try {
-        return marked.parse(fixedText, {
-          gfm: true,
-          breaks: true,
-          async: false
-        });
-      } catch (e) {
-        console.error('marked.parse failed:', e);
-        let html = escapeHtml(fixedText);
-        html = html.replace(/\\n/g, '<br>');
-        return html;
-      }
-    }
-    // Very simple fallback if marked fails to load
+if (typeof marked !== 'undefined') {
+  try {
+    return marked.parse(fixedText, {
+      gfm: true,
+      breaks: true,
+      async: false
+    });
+  } catch (e) {
+    console.error('marked.parse failed:', e);
     let html = escapeHtml(fixedText);
     html = html.replace(/\\n/g, '<br>');
     return html;
   }
-
-  function linkifyPaths(html) {
-    var insideCode = false;
-    return html.replace(/((?:<[^>]+>)|(?:[^<]+))/g, function(segment) {
-      if (segment.startsWith('<')) {
-        const lower = segment.toLowerCase();
-        if (lower.includes('<code') || lower.includes('<pre')) insideCode = true;
-        if (lower.includes('</code') || lower.includes('</pre')) insideCode = false;
-        return segment;
-      }
-      if (insideCode) return segment;
-      return segment.replace(/(\\/?)([a-zA-Z0-9_.\\-]+\\/(?:[a-zA-Z0-9_.\\-]+\\/)*[a-zA-Z0-9_.\\-]+\\.[a-zA-Z0-9]+)(?::(\\d+)(?:-(\\d+))?)?/g, function(m, slash, fp, ln) {
-        var fullPath = slash + fp;
-        return '<a class="file-link" href="#" data-path="' + fullPath + '" data-line="' + (ln || '') + '">' + m + '</a>';
-      });
-    });
+}
+// Very simple fallback if marked fails to load
+let html = escapeHtml(fixedText);
+html = html.replace(/\\n/g, '<br>');
+return html;
   }
 
-  function copyCode(btn) {
-    const code = btn.previousElementSibling || btn.parentElement.querySelector('code');
-    if (code) {
-      navigator.clipboard.writeText(code.textContent);
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+function linkifyPaths(html) {
+  var insideCode = false;
+  return html.replace(/((?:<[^>]+>)|(?:[^<]+))/g, function (segment) {
+    if (segment.startsWith('<')) {
+      const lower = segment.toLowerCase();
+      if (lower.includes('<code') || lower.includes('<pre')) insideCode = true;
+      if (lower.includes('</code') || lower.includes('</pre')) insideCode = false;
+      return segment;
     }
-  }
-  // Make copyCode globally available
-  window.copyCode = copyCode;
-
-  function addCopyButtons(container) {
-    container.querySelectorAll('pre').forEach((pre) => {
-      if (pre.querySelector('.copy-btn')) {
-        return;
-      }
-      const code = pre.querySelector('code');
-      if (!code) {
-        return;
-      }
-      const btn = document.createElement('button');
-      btn.className = 'copy-btn';
-      btn.textContent = 'Copy';
-      btn.addEventListener('click', () => copyCode(btn));
-      pre.appendChild(btn);
+    if (insideCode) return segment;
+    return segment.replace(/(\\/ ?)([a - zA - Z0 -9_.\\-] +\\/(?:[a-zA-Z0-9_.\\-]+\\/) * [a - zA - Z0 -9_.\\-] +\\.[a - zA - Z0 - 9] +)(?:: (\\d +)(?: -(\\d +))?)?/g, function(m, slash, fp, ln) {
+  var fullPath = slash + fp;
+  return '<a class="file-link" href="#" data-path="' + fullPath + '" data-line="' + (ln || '') + '">' + m + '</a>';
+});
     });
   }
 
-  function normalizeCodeLanguage(codeEl) {
-    const classNames = Array.from(codeEl.classList);
-    for (const name of classNames) {
-      if (name.startsWith('language-')) {
-        return name.slice('language-'.length).toLowerCase();
-      }
-    }
-    return '';
+function copyCode(btn) {
+  const code = btn.previousElementSibling || btn.parentElement.querySelector('code');
+  if (code) {
+    navigator.clipboard.writeText(code.textContent);
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
   }
+}
+// Make copyCode globally available
+window.copyCode = copyCode;
 
-  function upgradeCodeLanguages(container) {
-    container.querySelectorAll('pre code').forEach((code) => {
-      const lang = normalizeCodeLanguage(code);
-      if (!lang) {
-        return;
-      }
-      if (lang === 'shell' && !code.classList.contains('language-bash')) {
-        code.classList.add('language-bash');
-      }
-      if (lang === 'sh' && !code.classList.contains('language-bash')) {
-        code.classList.add('language-bash');
-      }
-      if (lang === 'ts' && !code.classList.contains('language-typescript')) {
-        code.classList.add('language-typescript');
-      }
-      if (lang === 'js' && !code.classList.contains('language-javascript')) {
-        code.classList.add('language-javascript');
-      }
-      if (lang === 'html' && !code.classList.contains('language-markup')) {
-        code.classList.add('language-markup');
-      }
-      if (lang === 'yml' && !code.classList.contains('language-yaml')) {
-        code.classList.add('language-yaml');
-      }
-      if (lang === 'md' && !code.classList.contains('language-markdown')) {
-        code.classList.add('language-markdown');
-      }
-    });
-  }
-
-  function highlightCodeBlocks(container) {
-    if (typeof Prism === 'undefined') {
+function addCopyButtons(container) {
+  container.querySelectorAll('pre').forEach((pre) => {
+    if (pre.querySelector('.copy-btn')) {
       return;
     }
-    container.querySelectorAll('pre code').forEach((code) => {
-      const lang = normalizeCodeLanguage(code);
-      if (lang === 'mermaid') {
-        return;
-      }
-      Prism.highlightElement(code);
-    });
-  }
-
-  function upgradeLinks(container) {
-    container.querySelectorAll('a[href]').forEach((link) => {
-      if (link.classList.contains('file-link')) {
-        return;
-      }
-      link.setAttribute('target', '_blank');
-      link.setAttribute('rel', 'noopener noreferrer');
-    });
-  }
-
-  function ensureMermaid() {
-    if (mermaidInitialized || typeof mermaid === 'undefined') {
+    const code = pre.querySelector('code');
+    if (!code) {
       return;
     }
-    const styles = getComputedStyle(document.body);
-    const fg = styles.getPropertyValue('--vscode-foreground').trim() || '#d4d4d4';
-    const bg = styles.getPropertyValue('--vscode-editorWidget-background').trim()
-      || styles.getPropertyValue('--vscode-sideBar-background').trim()
-      || '#1e1e1e';
-    const border = styles.getPropertyValue('--vscode-panel-border').trim() || fg;
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: 'strict',
-      theme: 'base',
-      themeVariables: {
-        darkMode: true,
-        background: bg,
-        mainBkg: bg,
-        primaryColor: bg,
-        secondaryColor: bg,
-        primaryBorderColor: border,
-        lineColor: fg,
-        textColor: fg,
-        primaryTextColor: fg
-      }
-    });
-    mermaidInitialized = true;
-  }
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', () => copyCode(btn));
+    pre.appendChild(btn);
+  });
+}
 
-  function upgradeMermaidBlocks(container) {
-    container.querySelectorAll('pre > code').forEach((code) => {
-      const lang = normalizeCodeLanguage(code);
-      if (lang !== 'mermaid') {
-        return;
-      }
-      const pre = code.parentElement;
-      if (!pre || !pre.parentElement) {
-        return;
-      }
-      const wrapper = document.createElement('div');
-      wrapper.className = 'mermaid-block';
-      const node = document.createElement('div');
-      node.className = 'mermaid';
-      node.textContent = code.textContent || '';
-      wrapper.appendChild(node);
-      pre.replaceWith(wrapper);
-    });
+function normalizeCodeLanguage(codeEl) {
+  const classNames = Array.from(codeEl.classList);
+  for (const name of classNames) {
+    if (name.startsWith('language-')) {
+      return name.slice('language-'.length).toLowerCase();
+    }
   }
+  return '';
+}
 
-  function renderMermaid(container) {
-    ensureMermaid();
-    if (typeof mermaid === 'undefined') {
+function upgradeCodeLanguages(container) {
+  container.querySelectorAll('pre code').forEach((code) => {
+    const lang = normalizeCodeLanguage(code);
+    if (!lang) {
       return;
     }
-    const nodes = Array.from(container.querySelectorAll('.mermaid'));
-    if (nodes.length === 0) {
+    if (lang === 'shell' && !code.classList.contains('language-bash')) {
+      code.classList.add('language-bash');
+    }
+    if (lang === 'sh' && !code.classList.contains('language-bash')) {
+      code.classList.add('language-bash');
+    }
+    if (lang === 'ts' && !code.classList.contains('language-typescript')) {
+      code.classList.add('language-typescript');
+    }
+    if (lang === 'js' && !code.classList.contains('language-javascript')) {
+      code.classList.add('language-javascript');
+    }
+    if (lang === 'html' && !code.classList.contains('language-markup')) {
+      code.classList.add('language-markup');
+    }
+    if (lang === 'yml' && !code.classList.contains('language-yaml')) {
+      code.classList.add('language-yaml');
+    }
+    if (lang === 'md' && !code.classList.contains('language-markdown')) {
+      code.classList.add('language-markdown');
+    }
+  });
+}
+
+function highlightCodeBlocks(container) {
+  if (typeof Prism === 'undefined') {
+    return;
+  }
+  container.querySelectorAll('pre code').forEach((code) => {
+    const lang = normalizeCodeLanguage(code);
+    if (lang === 'mermaid') {
       return;
     }
-    Promise.resolve(mermaid.run({ nodes })).catch((err) => {
-      nodes.forEach((node) => {
-        if (node.querySelector('svg')) {
-          return;
-        }
-        node.classList.remove('mermaid');
-        node.classList.add('mermaid-error');
-        node.textContent = 'Mermaid render failed\\n' + ((err && err.message) || String(err));
-      });
+    Prism.highlightElement(code);
+  });
+}
+
+function upgradeLinks(container) {
+  container.querySelectorAll('a[href]').forEach((link) => {
+    if (link.classList.contains('file-link')) {
+      return;
+    }
+    link.setAttribute('target', '_blank');
+    link.setAttribute('rel', 'noopener noreferrer');
+  });
+}
+
+function ensureMermaid() {
+  if (mermaidInitialized || typeof mermaid === 'undefined') {
+    return;
+  }
+  const styles = getComputedStyle(document.body);
+  const fg = styles.getPropertyValue('--vscode-foreground').trim() || '#d4d4d4';
+  const bg = styles.getPropertyValue('--vscode-editorWidget-background').trim()
+    || styles.getPropertyValue('--vscode-sideBar-background').trim()
+    || '#1e1e1e';
+  const border = styles.getPropertyValue('--vscode-panel-border').trim() || fg;
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: 'base',
+    themeVariables: {
+      darkMode: true,
+      background: bg,
+      mainBkg: bg,
+      primaryColor: bg,
+      secondaryColor: bg,
+      primaryBorderColor: border,
+      lineColor: fg,
+      textColor: fg,
+      primaryTextColor: fg
+    }
+  });
+  mermaidInitialized = true;
+}
+
+function upgradeMermaidBlocks(container) {
+  container.querySelectorAll('pre > code').forEach((code) => {
+    const lang = normalizeCodeLanguage(code);
+    if (lang !== 'mermaid') {
+      return;
+    }
+    const pre = code.parentElement;
+    if (!pre || !pre.parentElement) {
+      return;
+    }
+    const wrapper = document.createElement('div');
+    wrapper.className = 'mermaid-block';
+    const node = document.createElement('div');
+    node.className = 'mermaid';
+    node.textContent = code.textContent || '';
+    wrapper.appendChild(node);
+    pre.replaceWith(wrapper);
+  });
+}
+
+function renderMermaid(container) {
+  ensureMermaid();
+  if (typeof mermaid === 'undefined') {
+    return;
+  }
+  const nodes = Array.from(container.querySelectorAll('.mermaid'));
+  if (nodes.length === 0) {
+    return;
+  }
+  Promise.resolve(mermaid.run({ nodes })).catch((err) => {
+    nodes.forEach((node) => {
+      if (node.querySelector('svg')) {
+        return;
+      }
+      node.classList.remove('mermaid');
+      node.classList.add('mermaid-error');
+      node.textContent = 'Mermaid render failed\\n' + ((err && err.message) || String(err));
     });
-  }
+  });
+}
 
-  function renderMath(container) {
-    if (typeof renderMathInElement !== 'function') {
+function renderMath(container) {
+  if (typeof renderMathInElement !== 'function') {
+    return;
+  }
+  try {
+    renderMathInElement(container, {
+      throwOnError: false,
+      strict: 'ignore',
+      delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '\\[', right: '\\]', display: true },
+        { left: '$', right: '$', display: false },
+        { left: '\\(', right: '\\)', display: false }
+      ]
+    });
+  } catch {
+    // Ignore invalid partial formulas while streaming.
+  }
+}
+
+function parseAssistantSegments(rawText) {
+  const segments = [];
+  const lines = rawText.split('\\n');
+  let markdownLines = [];
+  let currentBlock = null;
+
+  function flushMarkdown() {
+    if (markdownLines.length === 0) {
       return;
     }
-    try {
-      renderMathInElement(container, {
-        throwOnError: false,
-        strict: 'ignore',
-        delimiters: [
-          { left: '$$', right: '$$', display: true },
-          { left: '\\[', right: '\\]', display: true },
-          { left: '$', right: '$', display: false },
-          { left: '\\(', right: '\\)', display: false }
-        ]
-      });
-    } catch {
-      // Ignore invalid partial formulas while streaming.
+    const text = markdownLines.join('\\n');
+    markdownLines = [];
+    if (!text.trim()) {
+      return;
     }
+    segments.push({ type: 'markdown', text });
   }
 
-  function parseAssistantSegments(rawText) {
-    const segments = [];
-    const lines = rawText.split('\\n');
-    let markdownLines = [];
-    let currentBlock = null;
-
-    function flushMarkdown() {
-      if (markdownLines.length === 0) {
-        return;
-      }
-      const text = markdownLines.join('\\n');
-      markdownLines = [];
-      if (!text.trim()) {
-        return;
-      }
-      segments.push({ type: 'markdown', text });
+  for (const line of lines) {
+    const blockMatch = line.match(/^\\[\\[JUMP_BLOCK_START\\|(thinking|tool)\\|(.+)\\]\\]$/);
+    if (blockMatch) {
+      flushMarkdown();
+      currentBlock = {
+        type: 'block',
+        blockType: blockMatch[1],
+        title: decodeURIComponent(blockMatch[2]),
+        lines: []
+      };
+      continue;
     }
 
-    for (const line of lines) {
-      const blockMatch = line.match(/^\\[\\[JUMP_BLOCK_START\\|(thinking|tool)\\|(.+)\\]\\]$/);
-      if (blockMatch) {
-        flushMarkdown();
-        currentBlock = {
-          type: 'block',
-          blockType: blockMatch[1],
-          title: decodeURIComponent(blockMatch[2]),
-          lines: []
-        };
-        continue;
-      }
-
-      if (line === '[[JUMP_BLOCK_END]]') {
-        if (currentBlock) {
-          segments.push({
-            type: 'block',
-            blockType: currentBlock.blockType,
-            title: currentBlock.title,
-            text: currentBlock.lines.join('\\n'),
-            open: false
-          });
-          currentBlock = null;
-        }
-        continue;
-      }
-
+    if (line === '[[JUMP_BLOCK_END]]') {
       if (currentBlock) {
-        currentBlock.lines.push(line);
-      } else {
-        markdownLines.push(line);
+        segments.push({
+          type: 'block',
+          blockType: currentBlock.blockType,
+          title: currentBlock.title,
+          text: currentBlock.lines.join('\\n'),
+          open: false
+        });
+        currentBlock = null;
       }
+      continue;
     }
-
-    flushMarkdown();
 
     if (currentBlock) {
-      segments.push({
-        type: 'block',
-        blockType: currentBlock.blockType,
-        title: currentBlock.title,
-        text: currentBlock.lines.join('\\n'),
-        open: true
-      });
-    }
-
-    return segments;
-  }
-
-  function createMarkdownSegment(text) {
-    const wrapper = document.createElement('div');
-    wrapper.innerHTML = linkifyPaths(renderMarkdown(text));
-    return wrapper;
-  }
-
-  function createBlockSegment(segment) {
-    const details = document.createElement('details');
-    details.className = segment.blockType === 'thinking' ? 'thinking-details' : 'tool-details';
-    details.open = Boolean(segment.open);
-
-    const summary = document.createElement('summary');
-    summary.textContent = segment.title;
-    details.appendChild(summary);
-
-    const bodyText = segment.text.replace(/\\n+$/g, '');
-    if (segment.blockType === 'thinking') {
-      const body = document.createElement('div');
-      body.className = 'thinking-body';
-      body.textContent = bodyText;
-      details.appendChild(body);
+      currentBlock.lines.push(line);
     } else {
-      const pre = document.createElement('pre');
-      const code = document.createElement('code');
-      code.textContent = bodyText;
-      pre.appendChild(code);
-      details.appendChild(pre);
+      markdownLines.push(line);
     }
-
-    return details;
   }
 
-  function renderAssistantContent(container, rawText) {
-    container.innerHTML = '';
-    const segments = parseAssistantSegments(rawText);
+  flushMarkdown();
 
-    if (segments.length === 0 && rawText.trim()) {
-      container.appendChild(createMarkdownSegment(rawText));
-    } else {
-      for (const segment of segments) {
-        if (segment.type === 'markdown') {
-          container.appendChild(createMarkdownSegment(segment.text));
-        } else {
-          container.appendChild(createBlockSegment(segment));
-        }
+  if (currentBlock) {
+    segments.push({
+      type: 'block',
+      blockType: currentBlock.blockType,
+      title: currentBlock.title,
+      text: currentBlock.lines.join('\\n'),
+      open: true
+    });
+  }
+
+  return segments;
+}
+
+function createMarkdownSegment(text) {
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = linkifyPaths(renderMarkdown(text));
+  return wrapper;
+}
+
+function createBlockSegment(segment) {
+  const details = document.createElement('details');
+  details.className = segment.blockType === 'thinking' ? 'thinking-details' : 'tool-details';
+  details.open = Boolean(segment.open);
+
+  const summary = document.createElement('summary');
+  summary.textContent = segment.title;
+  details.appendChild(summary);
+
+  const bodyText = segment.text.replace(/\\n+$/g, '');
+  if (segment.blockType === 'thinking') {
+    const body = document.createElement('div');
+    body.className = 'thinking-body';
+    body.textContent = bodyText;
+    details.appendChild(body);
+  } else {
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.textContent = bodyText;
+    pre.appendChild(code);
+    details.appendChild(pre);
+  }
+
+  return details;
+}
+
+function renderAssistantContent(container, rawText) {
+  container.innerHTML = '';
+  const segments = parseAssistantSegments(rawText);
+
+  if (segments.length === 0 && rawText.trim()) {
+    container.appendChild(createMarkdownSegment(rawText));
+  } else {
+    for (const segment of segments) {
+      if (segment.type === 'markdown') {
+        container.appendChild(createMarkdownSegment(segment.text));
+      } else {
+        container.appendChild(createBlockSegment(segment));
       }
     }
-    upgradeCodeLanguages(container);
-    upgradeMermaidBlocks(container);
-    addCopyButtons(container);
-    highlightCodeBlocks(container);
-    upgradeLinks(container);
-    renderMermaid(container);
-    renderMath(container);
   }
+  upgradeCodeLanguages(container);
+  upgradeMermaidBlocks(container);
+  addCopyButtons(container);
+  highlightCodeBlocks(container);
+  upgradeLinks(container);
+  renderMermaid(container);
+  renderMath(container);
+}
 
-  function scrollToBottom() {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+function scrollToBottom() {
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function addUserMessage(text) {
+  if (welcomeEl) welcomeEl.style.display = 'none';
+  const el = document.createElement('div');
+  el.className = 'message user';
+  el.textContent = text;
+  messagesEl.appendChild(el);
+  scrollToBottom();
+}
+
+function startAssistantMessage() {
+  const el = document.createElement('div');
+  el.className = 'message assistant';
+
+  const metaEl = document.createElement('div');
+  metaEl.className = 'assistant-meta';
+  el.appendChild(metaEl);
+
+  const contentEl = document.createElement('div');
+  contentEl.className = 'assistant-content';
+  el.appendChild(contentEl);
+
+  messagesEl.appendChild(el);
+  currentAssistantEl = el;
+  currentAssistantMetaEl = metaEl;
+  currentAssistantContentEl = contentEl;
+  currentAssistantRaw = '';
+  scrollToBottom();
+}
+
+// Throttled rendering: accumulate text, render at most once per 30ms to prevent lag
+let renderPending = false;
+let lastRenderTime = 0;
+
+function flushAssistantRender() {
+  if (!currentAssistantContentEl) {
+    return;
   }
+  renderAssistantContent(currentAssistantContentEl, currentAssistantRaw);
+  scrollToBottom();
+  lastRenderTime = Date.now();
+}
 
-  function addUserMessage(text) {
-    if (welcomeEl) welcomeEl.style.display = 'none';
-    const el = document.createElement('div');
-    el.className = 'message user';
-    el.textContent = text;
-    messagesEl.appendChild(el);
-    scrollToBottom();
+function appendToAssistant(text) {
+  if (!currentAssistantEl) startAssistantMessage();
+  currentAssistantRaw += text;
+  if (!renderPending) {
+    renderPending = true;
+    // Schedule re-render in 30ms, or immediately if we haven't rendered in a while
+    const timeSinceLastRender = Date.now() - lastRenderTime;
+    const scheduleDelay = timeSinceLastRender > 30 ? 0 : 30;
+
+    if (scheduleDelay === 0) {
+      flushAssistantRender();
+      renderPending = false;
+    } else {
+      setTimeout(function () {
+        renderPending = false;
+        flushAssistantRender();
+      }, scheduleDelay);
+    }
   }
+}
 
-  function startAssistantMessage() {
-    const el = document.createElement('div');
-    el.className = 'message assistant';
+function appendAssistantFlag(className, text) {
+  if (!currentAssistantEl) startAssistantMessage();
+  const el = document.createElement('div');
+  el.className = className;
+  el.textContent = text;
+  currentAssistantMetaEl.appendChild(el);
+  scrollToBottom();
+}
 
-    const metaEl = document.createElement('div');
-    metaEl.className = 'assistant-meta';
-    el.appendChild(metaEl);
+function escapeForRender(text) {
+  // Only escape characters that aren't part of markdown syntax
+  // We need a careful approach: escape HTML, then apply markdown
+  return text;
+}
 
-    const contentEl = document.createElement('div');
-    contentEl.className = 'assistant-content';
-    el.appendChild(contentEl);
-
-    messagesEl.appendChild(el);
-    currentAssistantEl = el;
-    currentAssistantMetaEl = metaEl;
-    currentAssistantContentEl = contentEl;
-    currentAssistantRaw = '';
-    scrollToBottom();
+function setStreaming(val) {
+  isStreaming = val;
+  inputEl.disabled = val;
+  addFileBtn.disabled = val;
+  if (val) {
+    sendBtn.textContent = '■';
+    sendBtn.title = 'Stop generating';
+    sendBtn.classList.add('stop-mode');
+  } else {
+    sendBtn.textContent = '↑';
+    sendBtn.title = 'Send (Enter)';
+    sendBtn.classList.remove('stop-mode');
+    inputEl.focus();
   }
+}
 
-  // Throttled rendering: accumulate text, render at most once per 30ms to prevent lag
-  let renderPending = false;
-  let lastRenderTime = 0;
+function endResponse() {
+  renderPending = false;
+  flushAssistantRender();
+  currentAssistantEl = null;
+  currentAssistantMetaEl = null;
+  currentAssistantContentEl = null;
+  currentAssistantRaw = '';
+  setStreaming(false);
+}
 
-  function flushAssistantRender() {
-    if (!currentAssistantContentEl) {
+function sendMessage() {
+  try {
+    const text = inputEl.value.trim();
+    if (!text || isStreaming) {
       return;
     }
-    renderAssistantContent(currentAssistantContentEl, currentAssistantRaw);
-    scrollToBottom();
-    lastRenderTime = Date.now();
-  }
-
-  function appendToAssistant(text) {
-    if (!currentAssistantEl) startAssistantMessage();
-    currentAssistantRaw += text;
-    if (!renderPending) {
-      renderPending = true;
-      // Schedule re-render in 30ms, or immediately if we haven't rendered in a while
-      const timeSinceLastRender = Date.now() - lastRenderTime;
-      const scheduleDelay = timeSinceLastRender > 30 ? 0 : 30;
-      
-      if (scheduleDelay === 0) {
-        flushAssistantRender();
-        renderPending = false;
-      } else {
-        setTimeout(function() {
-          renderPending = false;
-          flushAssistantRender();
-        }, scheduleDelay);
-      }
+    if (!Array.isArray(inputHistory)) {
+      inputHistory = [];
     }
-  }
-
-  function appendAssistantFlag(className, text) {
-    if (!currentAssistantEl) startAssistantMessage();
-    const el = document.createElement('div');
-    el.className = className;
-    el.textContent = text;
-    currentAssistantMetaEl.appendChild(el);
-    scrollToBottom();
-  }
-
-  function escapeForRender(text) {
-    // Only escape characters that aren't part of markdown syntax
-    // We need a careful approach: escape HTML, then apply markdown
-    return text;
-  }
-
-  function setStreaming(val) {
-    isStreaming = val;
-    inputEl.disabled = val;
-    addFileBtn.disabled = val;
-    if (val) {
-      sendBtn.textContent = '■';
-      sendBtn.title = 'Stop generating';
-      sendBtn.classList.add('stop-mode');
-    } else {
-      sendBtn.textContent = '↑';
-      sendBtn.title = 'Send (Enter)';
-      sendBtn.classList.remove('stop-mode');
-      inputEl.focus();
-    }
-  }
-
-  function endResponse() {
-    renderPending = false;
-    flushAssistantRender();
-    currentAssistantEl = null;
-    currentAssistantMetaEl = null;
-    currentAssistantContentEl = null;
-    currentAssistantRaw = '';
-    setStreaming(false);
-  }
-
-  function sendMessage() {
+    inputHistory.unshift(text);
+    historyIndex = -1;
+    savedInput = '';
+    persistHistory();
+    addUserMessage(text);
+    vscode.postMessage({ type: 'sendMessage', text });
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    setStreaming(true);
+  } catch (e) {
+    vscode.postMessage({ type: 'errorMessage', text: 'sendMessage error: ' + e.message + '\\n' + e.stack });
+    // Fallback: try to at least send the message if UI update fails
     try {
-      const text = inputEl.value.trim();
-      if (!text || isStreaming) {
-        return;
-      }
-      if (!Array.isArray(inputHistory)) {
-        inputHistory = [];
-      }
-      inputHistory.unshift(text);
-      historyIndex = -1;
-      savedInput = '';
-      persistHistory();
-      addUserMessage(text);
-      vscode.postMessage({ type: 'sendMessage', text });
-      inputEl.value = '';
-      inputEl.style.height = 'auto';
-      setStreaming(true);
-    } catch (e) {
-      vscode.postMessage({ type: 'errorMessage', text: 'sendMessage error: ' + e.message + '\\n' + e.stack });
-      // Fallback: try to at least send the message if UI update fails
-      try {
-        vscode.postMessage({ type: 'sendMessage', text: inputEl.value.trim() });
-      } catch (e2) {}
-    }
+      vscode.postMessage({ type: 'sendMessage', text: inputEl.value.trim() });
+    } catch (e2) { }
+  }
+}
+
+// ── Event handlers ──
+newChatBtn.addEventListener('click', () => {
+  vscode.postMessage({ type: 'newSession' });
+  messagesEl.innerHTML = '';
+  if (welcomeEl) {
+    messagesEl.appendChild(welcomeEl);
+    welcomeEl.style.display = '';
+  }
+  currentAssistantEl = null;
+  currentAssistantMetaEl = null;
+  currentAssistantContentEl = null;
+  currentAssistantRaw = '';
+  currentSelection = null;
+  attachedFiles = [];
+  renderContextChips();
+  setStreaming(false);
+});
+
+switchSessionBtn.addEventListener('click', () => {
+  vscode.postMessage({ type: 'switchSession' });
+});
+
+renameSessionBtn.addEventListener('click', () => {
+  vscode.postMessage({ type: 'renameSession' });
+});
+
+deleteSessionBtn.addEventListener('click', () => {
+  vscode.postMessage({ type: 'deleteSession' });
+});
+
+addFileBtn.addEventListener('click', () => {
+  vscode.postMessage({ type: 'addFile' });
+});
+
+sendBtn.addEventListener('click', () => {
+  sendBtn.classList.remove('vibrate');
+  void sendBtn.offsetWidth; // Trigger reflow to restart animation
+  sendBtn.classList.add('vibrate');
+
+  if (isStreaming) {
+    vscode.postMessage({ type: 'stop' });
+  } else {
+    sendMessage();
+  }
+});
+
+inputEl.addEventListener('keydown', (e) => {
+  // Prevent Enter from sending when using an IME (Input Method Editor)
+  // In many browsers, pressing Enter to select IME candidates fires keydown with keyCode 229
+  // or fires Enter but during composition.
+  if (e.isComposing || isImeComposing || e.keyCode === 229) {
+    return;
   }
 
-  // ── Event handlers ──
-  newChatBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'newSession' });
-    messagesEl.innerHTML = '';
+  // Check if the time since the last compositionend is very short
+  if (e.key === 'Enter' && (Date.now() - lastImeEndTime < 100)) {
+    return;
+  }
+
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+  // Navigate input history with up/down arrows
+  if (e.key === 'ArrowUp' && inputEl.selectionStart === 0 && inputEl.selectionEnd === 0) {
+    if (inputHistory.length > 0 && historyIndex < inputHistory.length - 1) {
+      if (historyIndex === -1) savedInput = inputEl.value;
+      historyIndex++;
+      inputEl.value = inputHistory[historyIndex];
+      e.preventDefault();
+    }
+  }
+  if (e.key === 'ArrowDown' && historyIndex >= 0) {
+    if (inputEl.selectionStart === inputEl.value.length) {
+      historyIndex--;
+      inputEl.value = historyIndex === -1 ? savedInput : inputHistory[historyIndex];
+      e.preventDefault();
+    }
+  }
+});
+
+inputEl.addEventListener('focus', () => {
+  vscode.postMessage({ type: 'inputFocus' });
+});
+inputEl.addEventListener('blur', () => {
+  vscode.postMessage({ type: 'inputBlur' });
+});
+
+// Auto-resize textarea
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+});
+
+// ── Context chips rendering ──
+function renderContextChips() {
+  contextArea.innerHTML = '';
+  // Selection chip
+  if (currentSelection) {
+    const chip = document.createElement('span');
+    chip.className = 'context-chip selection';
+    chip.innerHTML = '<span class="chip-icon">✂</span>'
+      + '<span class="chip-label">' + escapeHtml(currentSelection.relativePath)
+      + ':' + currentSelection.startLine + '-' + currentSelection.endLine
+      + ' (' + currentSelection.lineCount + ' lines)</span>'
+      + '<button class="chip-remove" data-action="clearSelection">×</button>';
+    contextArea.appendChild(chip);
+  }
+  // File chips
+  for (const f of attachedFiles) {
+    const chip = document.createElement('span');
+    chip.className = 'context-chip file';
+    chip.innerHTML = '<span class="chip-icon">📎</span>'
+      + '<span class="chip-label">' + escapeHtml(f.relativePath) + '</span>'
+      + '<button class="chip-remove" data-action="removeFile" data-path="' + escapeHtml(f.filePath) + '">×</button>';
+    contextArea.appendChild(chip);
+  }
+}
+
+contextArea.addEventListener('click', (e) => {
+  const btn = e.target.closest('.chip-remove');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  if (action === 'clearSelection') {
+    currentSelection = null;
+    vscode.postMessage({ type: 'clearSelection' });
+    renderContextChips();
+  } else if (action === 'removeFile') {
+    const fp = btn.dataset.path;
+    attachedFiles = attachedFiles.filter(f => f.filePath !== fp);
+    vscode.postMessage({ type: 'removeFile', filePath: fp });
+    renderContextChips();
+  }
+});
+
+// ── File path click handler ──
+messagesEl.addEventListener('click', (e) => {
+  const link = e.target.closest('.file-link');
+  if (!link) return;
+  e.preventDefault();
+  const fp = link.dataset.path;
+  const ln = link.dataset.line ? parseInt(link.dataset.line, 10) : undefined;
+  vscode.postMessage({ type: 'openFile', filePath: fp, line: ln });
+});
+
+function renderLoadedSession(session) {
+  messagesEl.innerHTML = '';
+  if (sessionTitleEl) {
+    sessionTitleEl.textContent = session?.title || 'New Chat';
+  }
+  currentAssistantEl = null;
+  currentAssistantMetaEl = null;
+  currentAssistantContentEl = null;
+  currentAssistantRaw = '';
+
+  const history = Array.isArray(session?.messages) ? session.messages : [];
+  if (history.length === 0) {
     if (welcomeEl) {
       messagesEl.appendChild(welcomeEl);
       welcomeEl.style.display = '';
     }
-    currentAssistantEl = null;
-    currentAssistantMetaEl = null;
-    currentAssistantContentEl = null;
-    currentAssistantRaw = '';
-    currentSelection = null;
-    attachedFiles = [];
-    renderContextChips();
-    setStreaming(false);
-  });
-
-  switchSessionBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'switchSession' });
-  });
-
-  renameSessionBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'renameSession' });
-  });
-
-  deleteSessionBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'deleteSession' });
-  });
-
-  addFileBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'addFile' });
-  });
-
-  sendBtn.addEventListener('click', () => {
-    sendBtn.classList.remove('vibrate');
-    void sendBtn.offsetWidth; // Trigger reflow to restart animation
-    sendBtn.classList.add('vibrate');
-
-    if (isStreaming) {
-      vscode.postMessage({ type: 'stop' });
-    } else {
-      sendMessage();
-    }
-  });
-
-  inputEl.addEventListener('keydown', (e) => {
-    // Prevent Enter from sending when using an IME (Input Method Editor)
-    // In many browsers, pressing Enter to select IME candidates fires keydown with keyCode 229
-    // or fires Enter but during composition.
-    if (e.isComposing || isImeComposing || e.keyCode === 229) {
-      return;
-    }
-    
-    // Check if the time since the last compositionend is very short
-    if (e.key === 'Enter' && (Date.now() - lastImeEndTime < 100)) {
-      return;
-    }
-
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-    // Navigate input history with up/down arrows
-    if (e.key === 'ArrowUp' && inputEl.selectionStart === 0 && inputEl.selectionEnd === 0) {
-      if (inputHistory.length > 0 && historyIndex < inputHistory.length - 1) {
-        if (historyIndex === -1) savedInput = inputEl.value;
-        historyIndex++;
-        inputEl.value = inputHistory[historyIndex];
-        e.preventDefault();
-      }
-    }
-    if (e.key === 'ArrowDown' && historyIndex >= 0) {
-      if (inputEl.selectionStart === inputEl.value.length) {
-        historyIndex--;
-        inputEl.value = historyIndex === -1 ? savedInput : inputHistory[historyIndex];
-        e.preventDefault();
-      }
-    }
-  });
-
-  inputEl.addEventListener('focus', () => {
-    vscode.postMessage({ type: 'inputFocus' });
-  });
-  inputEl.addEventListener('blur', () => {
-    vscode.postMessage({ type: 'inputBlur' });
-  });
-
-  // Auto-resize textarea
-  inputEl.addEventListener('input', () => {
-    inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
-  });
-
-  // ── Context chips rendering ──
-  function renderContextChips() {
-    contextArea.innerHTML = '';
-    // Selection chip
-    if (currentSelection) {
-      const chip = document.createElement('span');
-      chip.className = 'context-chip selection';
-      chip.innerHTML = '<span class="chip-icon">✂</span>'
-        + '<span class="chip-label">' + escapeHtml(currentSelection.relativePath)
-        + ':' + currentSelection.startLine + '-' + currentSelection.endLine
-        + ' (' + currentSelection.lineCount + ' lines)</span>'
-        + '<button class="chip-remove" data-action="clearSelection">×</button>';
-      contextArea.appendChild(chip);
-    }
-    // File chips
-    for (const f of attachedFiles) {
-      const chip = document.createElement('span');
-      chip.className = 'context-chip file';
-      chip.innerHTML = '<span class="chip-icon">📎</span>'
-        + '<span class="chip-label">' + escapeHtml(f.relativePath) + '</span>'
-        + '<button class="chip-remove" data-action="removeFile" data-path="' + escapeHtml(f.filePath) + '">×</button>';
-      contextArea.appendChild(chip);
-    }
+    return;
   }
 
-  contextArea.addEventListener('click', (e) => {
-    const btn = e.target.closest('.chip-remove');
-    if (!btn) return;
-    const action = btn.dataset.action;
-    if (action === 'clearSelection') {
-      currentSelection = null;
-      vscode.postMessage({ type: 'clearSelection' });
-      renderContextChips();
-    } else if (action === 'removeFile') {
-      const fp = btn.dataset.path;
-      attachedFiles = attachedFiles.filter(f => f.filePath !== fp);
-      vscode.postMessage({ type: 'removeFile', filePath: fp });
-      renderContextChips();
+  for (const msg of history) {
+    if (msg.role === 'user') {
+      addUserMessage(msg.content);
+    } else {
+      const el = document.createElement('div');
+      el.className = 'message assistant';
+      const contentEl = document.createElement('div');
+      contentEl.className = 'assistant-content';
+      renderAssistantContent(contentEl, msg.content || '');
+      el.appendChild(contentEl);
+      messagesEl.appendChild(el);
     }
-  });
+  }
+  scrollToBottom();
+}
 
-  // ── File path click handler ──
-  messagesEl.addEventListener('click', (e) => {
-    const link = e.target.closest('.file-link');
-    if (!link) return;
-    e.preventDefault();
-    const fp = link.dataset.path;
-    const ln = link.dataset.line ? parseInt(link.dataset.line, 10) : undefined;
-    vscode.postMessage({ type: 'openFile', filePath: fp, line: ln });
-  });
-
-  function renderLoadedSession(session) {
-    messagesEl.innerHTML = '';
-    if (sessionTitleEl) {
-      sessionTitleEl.textContent = session?.title || 'New Chat';
+// ── Messages from extension ──
+window.addEventListener('message', (event) => {
+  const data = event.data;
+  switch (data.type) {
+    case 'loadSession':
+      renderLoadedSession(data.session);
+      break;
+    case 'startResponse':
+      startAssistantMessage();
+      break;
+    case 'thinkingStart': {
+      // Do not inject the floating Thinking... indicator anymore,
+      // because we are rendering the actual thinking content now inside details.
+      break;
     }
-    currentAssistantEl = null;
-    currentAssistantMetaEl = null;
-    currentAssistantContentEl = null;
-    currentAssistantRaw = '';
-
-    const history = Array.isArray(session?.messages) ? session.messages : [];
-    if (history.length === 0) {
+    case 'thinkingEnd': {
+      break;
+    }
+    case 'toolStart': {
+      const normalized = /^(calls?)$/i.test(data.name || '') ? 'call_tools' : (data.name || 'call_tools');
+      const name = normalized !== 'call_tools' ? 'call_tools(' + normalized + ')' : 'call_tools';
+      appendAssistantFlag('tool-indicator', '🔧 ' + name);
+      break;
+    }
+    case 'toolEnd':
+      break;
+    case 'statusFlag': {
+      appendAssistantFlag('status-indicator', '• ' + (data.label || 'status'));
+      break;
+    }
+    case 'streamChunk':
+      appendToAssistant(data.text);
+      break;
+    case 'endResponse':
+      endResponse();
+      break;
+    case 'errorMessage': {
+      const el = document.createElement('div');
+      el.className = 'message error';
+      el.textContent = data.text;
+      messagesEl.appendChild(el);
+      scrollToBottom();
+      break;
+    }
+    case 'clearChat':
+      messagesEl.innerHTML = '';
       if (welcomeEl) {
         messagesEl.appendChild(welcomeEl);
         welcomeEl.style.display = '';
       }
-      return;
-    }
-
-    for (const msg of history) {
-      if (msg.role === 'user') {
-        addUserMessage(msg.content);
-      } else {
-        const el = document.createElement('div');
-        el.className = 'message assistant';
-        const contentEl = document.createElement('div');
-        contentEl.className = 'assistant-content';
-        renderAssistantContent(contentEl, msg.content || '');
-        el.appendChild(contentEl);
-        messagesEl.appendChild(el);
-      }
-    }
-    scrollToBottom();
+      currentAssistantEl = null;
+      currentAssistantMetaEl = null;
+      currentAssistantContentEl = null;
+      currentAssistantRaw = '';
+      currentSelection = null;
+      attachedFiles = [];
+      renderContextChips();
+      setStreaming(false);
+      break;
+    case 'selectionUpdate':
+      currentSelection = data.selection;
+      renderContextChips();
+      break;
+    case 'filesUpdate':
+      attachedFiles = data.files || [];
+      renderContextChips();
+      break;
+    case 'triggerSend':
+      sendMessage();
+      break;
   }
-
-  // ── Messages from extension ──
-  window.addEventListener('message', (event) => {
-    const data = event.data;
-    switch (data.type) {
-      case 'loadSession':
-        renderLoadedSession(data.session);
-        break;
-      case 'startResponse':
-        startAssistantMessage();
-        break;
-      case 'thinkingStart': {
-        // Do not inject the floating Thinking... indicator anymore,
-        // because we are rendering the actual thinking content now inside details.
-        break;
-      }
-      case 'thinkingEnd': {
-        break;
-      }
-      case 'toolStart': {
-        const normalized = /^(calls?)$/i.test(data.name || '') ? 'call_tools' : (data.name || 'call_tools');
-        const name = normalized !== 'call_tools' ? 'call_tools(' + normalized + ')' : 'call_tools';
-        appendAssistantFlag('tool-indicator', '🔧 ' + name);
-        break;
-      }
-      case 'toolEnd':
-        break;
-      case 'statusFlag': {
-        appendAssistantFlag('status-indicator', '• ' + (data.label || 'status'));
-        break;
-      }
-      case 'streamChunk':
-        appendToAssistant(data.text);
-        break;
-      case 'endResponse':
-        endResponse();
-        break;
-      case 'errorMessage': {
-        const el = document.createElement('div');
-        el.className = 'message error';
-        el.textContent = data.text;
-        messagesEl.appendChild(el);
-        scrollToBottom();
-        break;
-      }
-      case 'clearChat':
-        messagesEl.innerHTML = '';
-        if (welcomeEl) {
-          messagesEl.appendChild(welcomeEl);
-          welcomeEl.style.display = '';
-        }
-        currentAssistantEl = null;
-        currentAssistantMetaEl = null;
-        currentAssistantContentEl = null;
-        currentAssistantRaw = '';
-        currentSelection = null;
-        attachedFiles = [];
-        renderContextChips();
-        setStreaming(false);
-        break;
-      case 'selectionUpdate':
-        currentSelection = data.selection;
-        renderContextChips();
-        break;
-      case 'filesUpdate':
-        attachedFiles = data.files || [];
-        renderContextChips();
-        break;
-      case 'triggerSend':
-        sendMessage();
-        break;
-    }
-  });
+});
 </script>
-</body>
-</html>`;
+  </body>
+  </html>`;
   }
 }
 
