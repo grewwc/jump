@@ -264,6 +264,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'addFile':
           await this.pickAndAttachFiles();
           break;
+        case 'pasteImage':
+          await this.handlePastedImage(data.dataUrl, data.fileName);
+          break;
         case 'inputFocus':
           await vscode.commands.executeCommand('setContext', 'jumpHistory.chatInputFocused', true);
           break;
@@ -346,16 +349,54 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
     });
     if (!uris || uris.length === 0) { return; }
-    const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
     for (const uri of uris) {
       const fp = uri.fsPath;
       if (!this.attachedFiles.includes(fp)) {
         this.attachedFiles.push(fp);
       }
     }
+    this.postFilesUpdate();
+  }
+
+  /** Handle image pasted from clipboard in webview */
+  private async handlePastedImage(dataUrl: string, fileName: string): Promise<void> {
+    const os = require('os');
+    const fs = require('fs');
+    // Extract base64 data from data URL
+    const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (!match) { return; }
+    const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+    const base64Data = match[2];
+    const tmpDir = path.join(os.tmpdir(), 'jump-chat-images');
+    if (!fs.existsSync(tmpDir)) {
+      fs.mkdirSync(tmpDir, { recursive: true });
+    }
+    const finalName = fileName || `paste-${Date.now()}.${ext}`;
+    const tmpPath = path.join(tmpDir, finalName);
+    fs.writeFileSync(tmpPath, Buffer.from(base64Data, 'base64'));
+
+    if (!this.attachedFiles.includes(tmpPath)) {
+      this.attachedFiles.push(tmpPath);
+    }
+    this.postFilesUpdate();
+  }
+
+  private postFilesUpdate(): void {
+    const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+    const fs = require('fs');
     const chips = this.attachedFiles.map(fp => {
       const rel = wsFolder && fp.startsWith(wsFolder) ? fp.slice(wsFolder.length + 1) : path.basename(fp);
-      return { filePath: fp, relativePath: rel };
+      const isImage = /\.(jpg|jpeg|png|gif|webp|bmp|tif|tiff|ico|qoi|avif)$/i.test(fp);
+      let dataUrl: string | undefined;
+      if (isImage) {
+        try {
+          const bytes = fs.readFileSync(fp);
+          const ext = path.extname(fp).slice(1).toLowerCase();
+          const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+          dataUrl = `data:${mime};base64,${bytes.toString('base64')}`;
+        } catch { /* ignore */ }
+      }
+      return { filePath: fp, relativePath: rel, isImage, dataUrl };
     });
     this.view?.webview.postMessage({ type: 'filesUpdate', files: chips });
   }
@@ -364,12 +405,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!this.attachedFiles.includes(filePath)) {
       this.attachedFiles.push(filePath);
     }
-    const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-    const chips = this.attachedFiles.map(fp => {
-      const rel = wsFolder && fp.startsWith(wsFolder) ? fp.slice(wsFolder.length + 1) : path.basename(fp);
-      return { filePath: fp, relativePath: rel };
-    });
-    this.view?.webview.postMessage({ type: 'filesUpdate', files: chips });
+    this.postFilesUpdate();
   }
 
   private forceCleanup(): void {
@@ -984,7 +1020,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}' ${webview.cspSource}; script-src 'nonce-${nonce}' ${webview.cspSource}; font-src ${webview.cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}' ${webview.cspSource}; script-src 'nonce-${nonce}' ${webview.cspSource}; font-src ${webview.cspSource}; img-src data:;">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="${katexCssUri}">
 <link rel="stylesheet" href="${prismCssUri}">
@@ -1406,6 +1442,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     line-height: 1;
   }
   .context-chip .chip-remove:hover { opacity: 1; }
+  .context-chip .chip-thumb {
+    width: 20px;
+    height: 20px;
+    object-fit: cover;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
   .context-chip.selection { background: var(--vscode-textPreformat-background, var(--vscode-badge-background)); }
   .context-chip.file { background: var(--vscode-badge-background); }
   .input-actions {
@@ -2251,6 +2294,32 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
 });
 
+// Paste image support
+inputEl.addEventListener('paste', (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  let imageCount = 0;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (!file) continue;
+      const idx = imageCount++;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        if (typeof dataUrl === 'string') {
+          const ext = item.type.split('/')[1] || 'png';
+          const fileName = 'paste-' + Date.now() + '-' + idx + '.' + (ext === 'jpeg' ? 'jpg' : ext);
+          vscode.postMessage({ type: 'pasteImage', dataUrl, fileName });
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+});
+
 // ── Context chips rendering ──
 function renderContextChips() {
   contextArea.innerHTML = '';
@@ -2269,7 +2338,11 @@ function renderContextChips() {
   for (const f of attachedFiles) {
     const chip = document.createElement('span');
     chip.className = 'context-chip file';
-    chip.innerHTML = '<span class="chip-icon">📎</span>'
+    let iconHtml = '<span class="chip-icon">📎</span>';
+    if (f.isImage && f.dataUrl) {
+      iconHtml = '<img class="chip-thumb" src="' + f.dataUrl + '" alt="img">';
+    }
+    chip.innerHTML = iconHtml
       + '<span class="chip-label">' + escapeHtml(f.relativePath) + '</span>'
       + '<button class="chip-remove" data-action="removeFile" data-path="' + escapeHtml(f.filePath) + '">×</button>';
     contextArea.appendChild(chip);
