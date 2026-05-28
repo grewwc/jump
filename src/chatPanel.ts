@@ -657,20 +657,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       };
 
-      // #region debug-point logger
-      const debugLog = (event: string, data: Record<string, unknown>) => {
-        try {
-          const fs = require('fs');
-          const logLine = JSON.stringify({ session: 'tool-call-nesting', ts: Date.now(), event, ...data }) + '\n';
-          fs.appendFileSync('/Users/bytedance/self-dev/jump/.dbg/trae-debug-log-tool-call-nesting.ndjson', logLine);
-        } catch { /* ignore */ }
-      };
-      // #endregion debug-point logger
-
       const processLine = (rawLine: string) => {
         let line = rawLine;
 
-        debugLog('processLine', { rawLine, insideThinking, insideToolCall, insideToolResult, insideAidaTool, headerDone });
+        const stripStreamPrefix = (value: string): string => {
+          // Strip decorative stream prefixes (for tool/thinking output only).
+          return value.replace(/^(?:>\s*)?(?:(?:\s*[\u2502\u2503\u2506\u250a\u254e\u254f|¦]\s+)+)/u, '');
+        };
 
         if (insideToolResult && (line.match(/^(?:>\s*)?╭─/) || line.match(/^(?:>\s*)?╰─/) || line.match(/^(?:>\s*)?\[Thinking\]/i) || line.match(/^(?:>\s*)?[*_]Thinking[*_]/i))) {
           closeAnyOpenBlocks();
@@ -689,7 +682,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         if (insideAidaTool) {
           // Keep the raw text but strip leading `| ` if present, to show cleanly in the code block
-          const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '');
+          const stripped = stripStreamPrefix(line);
           emitAssistantText(stripped + '\n');
           return;
         }
@@ -710,7 +703,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }
           const idx = match ? match.index! : line.indexOf('done thinking') - 2;
 
-          const beforeDoneThinking = line.substring(0, Math.max(0, idx)).replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '').trim();
+          const beforeDoneThinking = stripStreamPrefix(line.substring(0, Math.max(0, idx))).trim();
           if (beforeDoneThinking && insideThinking) {
             emitAssistantText(beforeDoneThinking + '\n');
           }
@@ -728,7 +721,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         // While inside a thinking block, emit content and return early
         if (insideThinking) {
-          const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '');
+          const stripped = stripStreamPrefix(line);
           emitAssistantText(stripped + '\n');
           return;
         }
@@ -745,7 +738,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             // fall through
           } else {
             // If the line has actual content (not a known header), start emitting
-            const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '').trim();
+            const stripped = stripStreamPrefix(line).trim();
             if (stripped.length > 0) {
               headerDone = true;
               // Let it fall through instead of skipping
@@ -779,7 +772,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const trimmed = line.trim();
         if (/^(?:>\s*)?[│|]\s*result\s*:/i.test(trimmed)) {
           closeAnyOpenBlocks();
-          postStatus(trimmed.replace(/^(?:>\s*)?[│|]\s*/u, ''));
+          postStatus(stripStreamPrefix(trimmed));
           return;
         }
         if (/^(?:>\s*)?\[(Completed|Running|Failed)\]/i.test(trimmed)) {
@@ -811,7 +804,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         if (insideToolResult) {
-          const stripped = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '');
+          const stripped = stripStreamPrefix(line);
           emitAssistantText(stripped + '\n');
           return;
         }
@@ -838,8 +831,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
-        // Actual content – strip leading box-drawing bars (may have leading whitespace)
-        line = line.replace(/^(?:>\s*)?(?:\s*[│|]\s?)?/, '');
+        // Keep generic assistant content unchanged to avoid corrupting markdown tables.
         emitAssistantText(line + '\n');
       };
 
@@ -1746,20 +1738,53 @@ return html;
 
 function linkifyPaths(html) {
   var insideCode = false;
-  return html.replace(/((?:<[^>]+>)|(?:[^<]+))/g, function (segment) {
-    if (segment.startsWith('<')) {
-      const lower = segment.toLowerCase();
+  const pathRegex = /(^|[\s(>])((?:\.{1,2}\/|\/|[a-zA-Z0-9._-]+\/)[a-zA-Z0-9._\-/]*[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)(?::(\d+)(?:-(\d+))?)?/g;
+
+  return html.replace(/((?:<[^>]+>)|(?:[^<]+))/g, function (chunk) {
+    if (chunk.startsWith('<')) {
+      const lower = chunk.toLowerCase();
       if (lower.includes('<code') || lower.includes('<pre')) insideCode = true;
       if (lower.includes('</code') || lower.includes('</pre')) insideCode = false;
-      return segment;
+      return chunk;
     }
-    if (insideCode) return segment;
-    return segment.replace(/(\\/ ?)([a - zA - Z0 -9_.\\-] +\\/(?:[a-zA-Z0-9_.\\-]+\\/) * [a - zA - Z0 -9_.\\-] +\\.[a - zA - Z0 - 9] +)(?:: (\\d +)(?: -(\\d +))?)?/g, function(m, slash, fp, ln) {
-  var fullPath = slash + fp;
-  return '<a class="file-link" href="#" data-path="' + fullPath + '" data-line="' + (ln || '') + '">' + m + '</a>';
-});
+    if (insideCode) return chunk;
+
+    return chunk.replace(pathRegex, function (_m, lead, filePath, startLine, endLine) {
+      const suffix = startLine ? (endLine ? ':' + startLine + '-' + endLine : ':' + startLine) : '';
+      const display = filePath + suffix;
+      return lead + '<a class="file-link" href="#" data-path="' + filePath + '" data-line="' + (startLine || '') + '">' + display + '</a>';
     });
-  }
+  });
+}
+
+function sanitizeHtml(html) {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+
+  const blockedTags = 'script,style,iframe,object,embed,link,meta,base,form,input,button,textarea,select,option';
+  template.content.querySelectorAll(blockedTags).forEach((el) => el.remove());
+
+  template.content.querySelectorAll('*').forEach((el) => {
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value;
+
+      if (name.startsWith('on')) {
+        el.removeAttribute(attr.name);
+        continue;
+      }
+      if ((name === 'href' || name === 'src' || name === 'xlink:href') && /^\s*javascript:/i.test(value)) {
+        el.removeAttribute(attr.name);
+        continue;
+      }
+      if (name === 'style') {
+        el.removeAttribute(attr.name);
+      }
+    }
+  });
+
+  return template.innerHTML;
+}
 
 function copyCode(btn) {
   const code = btn.previousElementSibling || btn.parentElement.querySelector('code');
@@ -1926,6 +1951,15 @@ function renderMath(container) {
   if (typeof renderMathInElement !== 'function') {
     return;
   }
+
+  // Only render math when explicit delimiters are present.
+  // This avoids mis-parsing normal text that contains '$' and '_' characters.
+  const text = container.textContent || '';
+  const hasExplicitMath = /\$\$[\s\S]+?\$\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]/.test(text);
+  if (!hasExplicitMath) {
+    return;
+  }
+
   try {
     renderMathInElement(container, {
       throwOnError: false,
@@ -1933,7 +1967,6 @@ function renderMath(container) {
       delimiters: [
         { left: '$$', right: '$$', display: true },
         { left: '\\[', right: '\\]', display: true },
-        { left: '$', right: '$', display: false },
         { left: '\\(', right: '\\)', display: false }
       ]
     });
@@ -2011,7 +2044,7 @@ function parseAssistantSegments(rawText) {
 
 function createMarkdownSegment(text) {
   const wrapper = document.createElement('div');
-  wrapper.innerHTML = linkifyPaths(renderMarkdown(text));
+  wrapper.innerHTML = linkifyPaths(sanitizeHtml(renderMarkdown(text)));
   return wrapper;
 }
 

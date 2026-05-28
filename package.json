@@ -363,7 +363,10 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "regression:help": "node scripts/chat-regression-runner.js help",
+    "regression:prepare": "node scripts/chat-regression-runner.js prepare",
+    "regression:collect": "node scripts/chat-regression-runner.js collect"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
