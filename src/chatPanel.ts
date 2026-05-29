@@ -364,7 +364,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const fs = require('fs');
     // Extract base64 data from data URL
     const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
-    if (!match) { return; }
+    if (!match) {
+      return;
+    }
     const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
     const base64Data = match[2];
     const tmpDir = path.join(os.tmpdir(), 'jump-chat-images');
@@ -491,7 +493,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleUserMessage(text: string): Promise<void> {
-    if (!text.trim() || this.isStreaming) { return; }
+    if (!text.trim() || this.isStreaming) {
+      return;
+    }
 
     // Build final prompt with selection context prepended
     let prompt = text;
@@ -1738,7 +1742,7 @@ return html;
 
 function linkifyPaths(html) {
   var insideCode = false;
-  const pathRegex = /(^|[\s(>])((?:\.{1,2}\/|\/|[a-zA-Z0-9._-]+\/)[a-zA-Z0-9._\-/]*[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)(?::(\d+)(?:-(\d+))?)?/g;
+  const pathRegex = new RegExp('(^|[\\\\s(>])((?:\\\\.{1,2}\\\\/|\\\\/|[a-zA-Z0-9._-]+\\\\/)[a-zA-Z0-9._\\\\-/]*[a-zA-Z0-9._-]+\\\\.[a-zA-Z0-9._-]+)(?::(\\\\d+)(?:-(\\\\d+))?)?', 'g');
 
   return html.replace(/((?:<[^>]+>)|(?:[^<]+))/g, function (chunk) {
     if (chunk.startsWith('<')) {
@@ -2206,10 +2210,25 @@ function endResponse() {
   setStreaming(false);
 }
 
+function canSendMessage() {
+  return Boolean(inputEl.value.trim() || attachedFiles.length > 0 || currentSelection);
+}
+
+function fallbackPromptForContextOnly() {
+  if (attachedFiles.some((f) => f && f.isImage)) {
+    return 'Please analyze the attached image.';
+  }
+  if (attachedFiles.length > 0 || currentSelection) {
+    return 'Please analyze the attached context.';
+  }
+  return '';
+}
+
 function sendMessage() {
   try {
-    const text = inputEl.value.trim();
-    if (!text || isStreaming) {
+    const typedText = inputEl.value.trim();
+    const text = typedText || fallbackPromptForContextOnly();
+    if (!text || isStreaming || !canSendMessage()) {
       return;
     }
     if (!Array.isArray(inputHistory)) {
@@ -2228,7 +2247,10 @@ function sendMessage() {
     vscode.postMessage({ type: 'errorMessage', text: 'sendMessage error: ' + e.message + '\\n' + e.stack });
     // Fallback: try to at least send the message if UI update fails
     try {
-      vscode.postMessage({ type: 'sendMessage', text: inputEl.value.trim() });
+      const fallbackText = inputEl.value.trim() || fallbackPromptForContextOnly();
+      if (fallbackText) {
+        vscode.postMessage({ type: 'sendMessage', text: fallbackText });
+      }
     } catch (e2) { }
   }
 }
@@ -2280,6 +2302,9 @@ sendBtn.addEventListener('click', () => {
 });
 
 inputEl.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented) {
+    return;
+  }
   // Prevent Enter from sending when using an IME (Input Method Editor)
   // In many browsers, pressing Enter to select IME candidates fires keydown with keyCode 229
   // or fires Enter but during composition.
@@ -2314,6 +2339,23 @@ inputEl.addEventListener('keydown', (e) => {
   }
 });
 
+document.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented || isStreaming) {
+    return;
+  }
+  if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) {
+    return;
+  }
+  if (document.activeElement !== inputEl) {
+    return;
+  }
+  if (e.isComposing || isImeComposing || e.keyCode === 229 || Date.now() - lastImeEndTime < 100) {
+    return;
+  }
+  e.preventDefault();
+  sendMessage();
+}, true);
+
 inputEl.addEventListener('focus', () => {
   vscode.postMessage({ type: 'inputFocus' });
 });
@@ -2328,29 +2370,106 @@ inputEl.addEventListener('input', () => {
 });
 
 // Paste image support
-inputEl.addEventListener('paste', (e) => {
-  const items = e.clipboardData && e.clipboardData.items;
-  if (!items) return;
+function postPastedImage(file, index) {
+  if (!file || !file.type || !file.type.startsWith('image/')) {
+    return false;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    if (typeof dataUrl === 'string') {
+      const ext = file.type.split('/')[1] || 'png';
+      const safeExt = ext === 'jpeg' ? 'jpg' : ext;
+      const fileName = 'paste-' + Date.now() + '-' + index + '.' + safeExt;
+      vscode.postMessage({ type: 'pasteImage', dataUrl, fileName });
+    }
+  };
+  reader.onerror = () => {
+    vscode.postMessage({ type: 'errorMessage', text: 'Failed to read pasted image.' });
+  };
+  reader.readAsDataURL(file);
+  return true;
+}
+
+let lastImagePasteAt = 0;
+function handlePasteEvent(e) {
+  if (e.defaultPrevented) {
+    return false;
+  }
+  const clipboard = e.clipboardData;
+  if (!clipboard) return false;
+  let handled = false;
   let imageCount = 0;
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (item.type.startsWith('image/')) {
-      e.preventDefault();
-      const file = item.getAsFile();
-      if (!file) continue;
-      const idx = imageCount++;
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result;
-        if (typeof dataUrl === 'string') {
-          const ext = item.type.split('/')[1] || 'png';
-          const fileName = 'paste-' + Date.now() + '-' + idx + '.' + (ext === 'jpeg' ? 'jpg' : ext);
-          vscode.postMessage({ type: 'pasteImage', dataUrl, fileName });
+
+  if (clipboard.items) {
+    for (let i = 0; i < clipboard.items.length; i++) {
+      const item = clipboard.items[i];
+      if (item.type && item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (postPastedImage(file, imageCount++)) {
+          handled = true;
         }
-      };
-      reader.readAsDataURL(file);
+      }
     }
   }
+
+  if (!handled && clipboard.files) {
+    for (let i = 0; i < clipboard.files.length; i++) {
+      if (postPastedImage(clipboard.files[i], imageCount++)) {
+        handled = true;
+      }
+    }
+  }
+
+  if (handled) {
+    lastImagePasteAt = Date.now();
+    e.preventDefault();
+    inputEl.focus();
+  }
+  return handled;
+}
+
+let clipboardReadPending = false;
+async function tryReadClipboardImages() {
+  if (Date.now() - lastImagePasteAt < 500) {
+    return;
+  }
+  if (clipboardReadPending || !navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+    return;
+  }
+  clipboardReadPending = true;
+  try {
+    const items = await navigator.clipboard.read();
+    let imageCount = 0;
+    for (const item of items) {
+      const imageType = item.types.find((type) => type.startsWith('image/'));
+      if (!imageType) {
+        continue;
+      }
+      const blob = await item.getType(imageType);
+      const ext = imageType.split('/')[1] || 'png';
+      const file = new File([blob], 'clipboard.' + (ext === 'jpeg' ? 'jpg' : ext), { type: imageType });
+      if (postPastedImage(file, imageCount++)) {
+        lastImagePasteAt = Date.now();
+      }
+    }
+  } catch {
+    // Clipboard read permission is not always available in VS Code webviews.
+  } finally {
+    clipboardReadPending = false;
+  }
+}
+
+inputEl.addEventListener('paste', handlePasteEvent);
+document.addEventListener('paste', handlePasteEvent, true);
+document.addEventListener('keydown', (e) => {
+  const isPasteShortcut = (e.key === 'v' || e.key === 'V') && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey;
+  if (!isPasteShortcut) {
+    return;
+  }
+  setTimeout(() => {
+    void tryReadClipboardImages();
+  }, 50);
 });
 
 // ── Context chips rendering ──
