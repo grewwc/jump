@@ -13,6 +13,11 @@ interface ChatMessage {
   content: string;
 }
 
+interface ChatRuntimeOptions {
+  model?: string;
+  reasoningEffort?: string;
+}
+
 interface ChatSession {
   id: string;
   title: string;
@@ -32,6 +37,7 @@ interface SelectionContext {
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'jumpHistoryChat';
   private static readonly sessionsStateKey = 'jumpHistory.chat.sessions';
+  private static readonly modelOptionsStateKey = 'jumpHistory.chat.availableModels';
   private static readonly maxSessions = 50;
   private static readonly stopGracePeriodMs = 1500;
   private static readonly stopForceKillMs = 4000;
@@ -46,12 +52,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private currentSelection: SelectionContext | null = null;
   private attachedFiles: string[] = [];
   private sessions: ChatSession[] = [];
+  private availableModels: string[];
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly workspaceState: vscode.Memento,
   ) {
     this.sessions = this.workspaceState.get<ChatSession[]>(ChatViewProvider.sessionsStateKey, []);
+    this.availableModels = this.workspaceState.get<string[]>(ChatViewProvider.modelOptionsStateKey, []);
     this.sessionId = this.sessions[0]?.id ?? `vscode-${Date.now().toString(36)}`;
     if (this.sessions.length === 0) {
       this.sessions = [this.createSession(this.sessionId, 'New Chat')];
@@ -171,6 +179,77 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async resolveAvailableModels(): Promise<string[]> {
+    this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.env.HOME ?? '/';
+
+    return new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      try {
+        const child = cp.spawn(this.agentBinary, [], {
+          cwd,
+          env: { ...process.env },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        const finish = (rawText: string) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          const matches = Array.from(
+            stripAnsi(rawText).matchAll(/^\s*(?:>>>\s*)?([a-zA-Z0-9._-]+)\s+\[[^\]]+\]\s*$/gm),
+          ).map((match) => match[1]);
+          const unique = [...new Set(matches)];
+          resolve(unique);
+        };
+
+        const timer = setTimeout(() => {
+          try {
+            child.kill();
+          } catch {
+            // ignore
+          }
+          finish(`${stdout}\n${stderr}`);
+        }, 4000);
+
+        child.stdout?.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString();
+        });
+        child.stderr?.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+        child.on('error', () => {
+          clearTimeout(timer);
+          finish(`${stdout}\n${stderr}`);
+        });
+        child.on('close', () => {
+          clearTimeout(timer);
+          finish(`${stdout}\n${stderr}`);
+        });
+
+        child.stdin?.write('/model\n');
+        child.stdin?.end();
+      } catch {
+        resolve([]);
+      }
+    });
+  }
+
+  private async postRuntimeOptionsMeta(): Promise<void> {
+    const resolvedModels = await this.resolveAvailableModels();
+    if (resolvedModels.length > 0) {
+      this.availableModels = resolvedModels;
+      await this.workspaceState.update(ChatViewProvider.modelOptionsStateKey, resolvedModels);
+    }
+    this.view?.webview.postMessage({
+      type: 'runtimeOptionsMeta',
+      models: this.availableModels,
+    });
+  }
+
   public async switchSessionQuickPick(): Promise<void> {
     const items = this.sessions
       .slice()
@@ -215,21 +294,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       localResourceRoots: [this.extensionUri],
     };
 
-    webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
-    this.postCurrentSessionToWebview();
-
-    if (this.isStreaming && this.currentStreamingOutput) {
-      webviewView.webview.postMessage({ type: 'startResponse' });
-      webviewView.webview.postMessage({ type: 'streamChunk', text: this.currentStreamingOutput });
-    }
-
     webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
         case 'errorMessage':
           console.error('[Webview Error]', data.text);
           break;
         case 'sendMessage':
-          await this.handleUserMessage(data.text);
+          await this.handleUserMessage(data.text, {
+            model: typeof data.model === 'string' ? data.model : undefined,
+            reasoningEffort: typeof data.reasoningEffort === 'string' ? data.reasoningEffort : undefined,
+          });
           break;
         case 'stop':
           this.view?.webview.postMessage({ type: 'statusFlag', label: 'Stopping...' });
@@ -258,6 +332,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'removeFile':
           this.attachedFiles = this.attachedFiles.filter(f => f !== data.filePath);
           break;
+        case 'requestRuntimeOptionsMeta':
+          void this.postRuntimeOptionsMeta();
+          break;
         case 'clearSelection':
           this.currentSelection = null;
           break;
@@ -278,6 +355,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
       }
     });
+
+    webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
+    this.postCurrentSessionToWebview();
+    void this.postRuntimeOptionsMeta();
+
+    if (this.isStreaming && this.currentStreamingOutput) {
+      webviewView.webview.postMessage({ type: 'startResponse' });
+      webviewView.webview.postMessage({ type: 'streamChunk', text: this.currentStreamingOutput });
+    }
   }
 
   public triggerSend(): void {
@@ -492,7 +578,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleUserMessage(text: string): Promise<void> {
+  private async handleUserMessage(text: string, runtimeOptions: ChatRuntimeOptions = {}): Promise<void> {
     if (!text.trim() || this.isStreaming) {
       return;
     }
@@ -520,6 +606,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
 
     const args = ['--session', this.sessionId];
+    const model = runtimeOptions.model?.trim();
+    if (model) {
+      args.push('--model', model);
+    }
+    const reasoningEffort = runtimeOptions.reasoningEffort?.trim();
+    if (reasoningEffort) {
+      args.push('--reasoning-effort', reasoningEffort);
+    }
 
     // Attach files via --files flag
     const allFiles = [...this.attachedFiles];
@@ -1031,6 +1125,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     flex-direction: column;
     height: 100vh;
     overflow: hidden;
+    position: relative;
   }
 
   /* Header */
@@ -1098,13 +1193,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /* Messages */
-  .messages {
+  .messages-shell {
     flex: 1;
+    min-height: 0;
+    position: relative;
+  }
+  .messages {
+    height: 100%;
     overflow-y: auto;
     padding: 12px;
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+  .jump-to-bottom-btn {
+    position: absolute;
+    right: 16px;
+    bottom: 16px;
+    width: 30px;
+    height: 30px;
+    border: 1px solid rgba(127, 127, 127, 0.18);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)) 92%, transparent);
+    color: color-mix(in srgb, var(--vscode-input-foreground) 78%, transparent);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(6px);
+    pointer-events: none;
+    transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+    z-index: 3;
+  }
+  .jump-to-bottom-btn.visible {
+    opacity: 0.92;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+  .jump-to-bottom-btn:hover {
+    background: color-mix(in srgb, var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)) 88%, transparent);
+    color: var(--vscode-input-foreground);
   }
 
   .welcome {
@@ -1375,6 +1505,79 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     flex: 1;
     position: relative;
   }
+  .input-toolbar {
+    position: absolute;
+    left: 12px;
+    right: 72px;
+    bottom: 12px;
+    display: flex;
+    gap: 2px;
+    align-items: center;
+    padding: 2px;
+    width: fit-content;
+    max-width: calc(100% - 72px);
+    border: 1px solid rgba(127, 127, 127, 0.14);
+    border-radius: 8px;
+    background: rgba(127, 127, 127, 0.06);
+    pointer-events: none;
+  }
+  .input-select {
+    min-width: 0;
+    max-width: 100%;
+    height: 22px;
+    padding: 0 18px 0 8px;
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: color-mix(in srgb, var(--vscode-input-foreground) 88%, transparent);
+    font: inherit;
+    font-size: 11px;
+    line-height: 22px;
+    pointer-events: auto;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='rgba(255,255,255,0.55)' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+  }
+  .input-select.model-select {
+    flex: 0 1 118px;
+  }
+  .input-select.reasoning-select {
+    flex: 0 0 78px;
+  }
+  .input-select:hover:not(:disabled),
+  .input-select:focus {
+    background-color: rgba(127, 127, 127, 0.10);
+    color: var(--vscode-input-foreground);
+  }
+  .refresh-model-btn {
+    flex: 0 0 22px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: color-mix(in srgb, var(--vscode-input-foreground) 62%, transparent);
+    cursor: pointer;
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    line-height: 1;
+  }
+  .refresh-model-btn:hover:not(:disabled) {
+    border-color: transparent;
+    background: rgba(127, 127, 127, 0.10);
+    color: var(--vscode-input-foreground);
+  }
+  .refresh-model-btn:disabled {
+    opacity: 0.38;
+    cursor: default;
+  }
   textarea {
     width: 100%;
     resize: none;
@@ -1383,7 +1586,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     color: var(--vscode-input-foreground);
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
-    padding: 12px 38px 12px 12px;
+    padding: 12px 70px 44px 12px;
     border-radius: 6px;
     outline: none;
     line-height: 1.4;
@@ -1492,16 +1695,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <button id="newChatBtn" title="New Chat">✚</button>
     </div>
   </div>
-  <div class="messages" id="messages">
-    <div class="welcome" id="welcome">
-      <h3>AI Agent</h3>
-      <p>Ask anything. Powered by your local agent.</p>
+  <div class="messages-shell">
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <h3>AI Agent</h3>
+        <p>Ask anything. Powered by your local agent.</p>
+      </div>
     </div>
+    <button id="jumpToBottomBtn" class="jump-to-bottom-btn" title="Jump to bottom">↓</button>
   </div>
   <div class="context-area" id="contextArea"></div>
   <div class="input-area">
     <div class="input-wrapper">
       <textarea id="input" rows="3" placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"></textarea>
+      <div class="input-toolbar">
+        <select id="modelSelect" class="input-select model-select">
+          <option value="">Default</option>
+        </select>
+        <button id="refreshModelBtn" class="refresh-model-btn" title="Refresh models">⟳</button>
+        <select id="reasoningEffortSelect" class="input-select reasoning-select">
+          <option value="">Default</option>
+          <option value="minimal">minimal</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="off">off</option>
+        </select>
+      </div>
       <div class="input-actions">
         <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
         <button class="send-btn" id="sendBtn" title="Send (Enter)">↑</button>
@@ -1555,6 +1775,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   window.addEventListener('error', (event) => {
     vscode.postMessage({ type: 'errorMessage', text: 'Webview Script Error: ' + event.message + '\\nSource: ' + event.filename });
   });
+  vscode.postMessage({ type: 'requestRuntimeOptionsMeta' });
 
   const messagesEl = document.getElementById('messages');
   const welcomeEl = document.getElementById('welcome');
@@ -1567,6 +1788,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const contextArea = document.getElementById('contextArea');
   const addFileBtn = document.getElementById('addFileBtn');
   const sendBtn = document.getElementById('sendBtn');
+  const jumpToBottomBtn = document.getElementById('jumpToBottomBtn');
+  const modelSelect = document.getElementById('modelSelect');
+  const refreshModelBtn = document.getElementById('refreshModelBtn');
+  const reasoningEffortSelect = document.getElementById('reasoningEffortSelect');
 
   let isStreaming = false;
   let currentAssistantEl = null;
@@ -1578,6 +1803,68 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let mermaidInitialized = false;
   let isImeComposing = false;
   let lastImeEndTime = 0;
+  let isRefreshingModels = false;
+  let followBottom = true;
+  let pauseFollowForExpandedTag = false;
+  let isProgrammaticScroll = false;
+  const blockOpenState = Object.create(null);
+  const nearBottomThreshold = 24;
+
+  function isNearBottom() {
+    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= nearBottomThreshold;
+  }
+
+  function updateJumpToBottomButton() {
+    if (!jumpToBottomBtn) {
+      return;
+    }
+    const shouldShow = !isNearBottom() || !followBottom || pauseFollowForExpandedTag;
+    jumpToBottomBtn.classList.toggle('visible', shouldShow);
+    jumpToBottomBtn.title = pauseFollowForExpandedTag ? 'Resume auto-follow and jump to bottom' : 'Jump to bottom';
+  }
+
+  function scrollToBottom(force) {
+    if (!force && (!followBottom || pauseFollowForExpandedTag)) {
+      updateJumpToBottomButton();
+      return;
+    }
+    isProgrammaticScroll = true;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    requestAnimationFrame(() => {
+      isProgrammaticScroll = false;
+      if (force) {
+        followBottom = true;
+      }
+      updateJumpToBottomButton();
+    });
+  }
+
+  function resumeAutoFollowAndJump() {
+    followBottom = true;
+    pauseFollowForExpandedTag = false;
+    scrollToBottom(true);
+  }
+
+  function hasExpandedBlocks() {
+    return Object.values(blockOpenState).some(Boolean);
+  }
+
+  function setModelRefreshState(refreshing) {
+    isRefreshingModels = refreshing;
+    if (refreshModelBtn) {
+      refreshModelBtn.disabled = refreshing || isStreaming;
+      refreshModelBtn.textContent = refreshing ? '…' : '⟳';
+      refreshModelBtn.title = refreshing ? 'Refreshing models...' : 'Refresh models';
+    }
+  }
+
+  function requestRuntimeOptionsMeta(forceRefresh) {
+    if (isRefreshingModels) {
+      return;
+    }
+    setModelRefreshState(true);
+    vscode.postMessage({ type: 'requestRuntimeOptionsMeta', forceRefresh: !!forceRefresh });
+  }
 
   inputEl.addEventListener('compositionstart', () => {
     isImeComposing = true;
@@ -1592,9 +1879,57 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let inputHistory = prevState.inputHistory || [];
   let historyIndex = -1;
   let savedInput = '';
+  let availableModels = [];
+  let runtimeOptions = {
+    model: typeof prevState.model === 'string' ? prevState.model : '',
+    reasoningEffort: typeof prevState.reasoningEffort === 'string' ? prevState.reasoningEffort : ''
+  };
+
+  if (reasoningEffortSelect) {
+    reasoningEffortSelect.value = runtimeOptions.reasoningEffort;
+  }
+
+  function renderModelOptions() {
+    if (!modelSelect) {
+      return;
+    }
+    const currentValue = runtimeOptions.model || '';
+    const merged = [''].concat(availableModels || []);
+    if (currentValue && !merged.includes(currentValue)) {
+      merged.push(currentValue);
+    }
+    modelSelect.innerHTML = '';
+    merged.forEach((value) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value || 'Default';
+      if (value === currentValue) {
+        option.selected = true;
+      }
+      modelSelect.appendChild(option);
+    });
+  }
+  renderModelOptions();
+  setModelRefreshState(false);
 
   function persistHistory() {
-    vscode.setState(Object.assign({}, vscode.getState() || {}, { inputHistory: inputHistory.slice(0, 100) }));
+    vscode.setState(Object.assign({}, vscode.getState() || {}, {
+      inputHistory: inputHistory.slice(0, 100),
+      model: runtimeOptions.model,
+      reasoningEffort: runtimeOptions.reasoningEffort
+    }));
+  }
+
+  function persistRuntimeOptions() {
+    runtimeOptions = {
+      model: modelSelect ? modelSelect.value : '',
+      reasoningEffort: reasoningEffortSelect ? reasoningEffortSelect.value : ''
+    };
+    vscode.setState(Object.assign({}, vscode.getState() || {}, {
+      inputHistory: inputHistory.slice(0, 100),
+      model: runtimeOptions.model,
+      reasoningEffort: runtimeOptions.reasoningEffort
+    }));
   }
 
   // ── Simple Markdown → HTML ──
@@ -2052,10 +2387,13 @@ function createMarkdownSegment(text) {
   return wrapper;
 }
 
-function createBlockSegment(segment) {
+function createBlockSegment(segment, blockKey) {
   const details = document.createElement('details');
   details.className = segment.blockType === 'thinking' ? 'thinking-details' : 'tool-details';
-  details.open = Boolean(segment.open);
+  details.open = Object.prototype.hasOwnProperty.call(blockOpenState, blockKey)
+    ? Boolean(blockOpenState[blockKey])
+    : Boolean(segment.open);
+  details.dataset.blockKey = blockKey;
 
   const summary = document.createElement('summary');
   summary.textContent = segment.title;
@@ -2075,6 +2413,20 @@ function createBlockSegment(segment) {
     details.appendChild(pre);
   }
 
+  details.addEventListener('toggle', () => {
+    blockOpenState[blockKey] = details.open;
+    if (details.open) {
+      pauseFollowForExpandedTag = true;
+      followBottom = false;
+    } else if (!hasExpandedBlocks() && isNearBottom()) {
+      pauseFollowForExpandedTag = false;
+      followBottom = true;
+    } else if (!hasExpandedBlocks()) {
+      pauseFollowForExpandedTag = false;
+    }
+    updateJumpToBottomButton();
+  });
+
   return details;
 }
 
@@ -2085,11 +2437,14 @@ function renderAssistantContent(container, rawText) {
   if (segments.length === 0 && rawText.trim()) {
     container.appendChild(createMarkdownSegment(rawText));
   } else {
+    let blockIndex = 0;
     for (const segment of segments) {
       if (segment.type === 'markdown') {
         container.appendChild(createMarkdownSegment(segment.text));
       } else {
-        container.appendChild(createBlockSegment(segment));
+        const blockKey = segment.blockType + ':' + blockIndex + ':' + segment.title;
+        blockIndex += 1;
+        container.appendChild(createBlockSegment(segment, blockKey));
       }
     }
   }
@@ -2102,17 +2457,13 @@ function renderAssistantContent(container, rawText) {
   renderMath(container);
 }
 
-function scrollToBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
 function addUserMessage(text) {
   if (welcomeEl) welcomeEl.style.display = 'none';
   const el = document.createElement('div');
   el.className = 'message user';
   el.textContent = text;
   messagesEl.appendChild(el);
-  scrollToBottom();
+  scrollToBottom(true);
 }
 
 function startAssistantMessage() {
@@ -2132,7 +2483,7 @@ function startAssistantMessage() {
   currentAssistantMetaEl = metaEl;
   currentAssistantContentEl = contentEl;
   currentAssistantRaw = '';
-  scrollToBottom();
+  scrollToBottom(true);
 }
 
 // Throttled rendering: accumulate text, render at most once per 30ms to prevent lag
@@ -2144,7 +2495,7 @@ function flushAssistantRender() {
     return;
   }
   renderAssistantContent(currentAssistantContentEl, currentAssistantRaw);
-  scrollToBottom();
+  scrollToBottom(false);
   lastRenderTime = Date.now();
 }
 
@@ -2175,7 +2526,7 @@ function appendAssistantFlag(className, text) {
   el.className = className;
   el.textContent = text;
   currentAssistantMetaEl.appendChild(el);
-  scrollToBottom();
+  scrollToBottom(false);
 }
 
 function escapeForRender(text) {
@@ -2188,6 +2539,15 @@ function setStreaming(val) {
   isStreaming = val;
   inputEl.disabled = val;
   addFileBtn.disabled = val;
+  if (modelSelect) {
+    modelSelect.disabled = val;
+  }
+  if (refreshModelBtn) {
+    refreshModelBtn.disabled = val || isRefreshingModels;
+  }
+  if (reasoningEffortSelect) {
+    reasoningEffortSelect.disabled = val;
+  }
   if (val) {
     sendBtn.textContent = '■';
     sendBtn.title = 'Stop generating';
@@ -2208,6 +2568,7 @@ function endResponse() {
   currentAssistantContentEl = null;
   currentAssistantRaw = '';
   setStreaming(false);
+  updateJumpToBottomButton();
 }
 
 function canSendMessage() {
@@ -2239,7 +2600,12 @@ function sendMessage() {
     savedInput = '';
     persistHistory();
     addUserMessage(text);
-    vscode.postMessage({ type: 'sendMessage', text });
+    vscode.postMessage({
+      type: 'sendMessage',
+      text,
+      model: runtimeOptions.model,
+      reasoningEffort: runtimeOptions.reasoningEffort
+    });
     inputEl.value = '';
     inputEl.style.height = 'auto';
     setStreaming(true);
@@ -2269,8 +2635,14 @@ newChatBtn.addEventListener('click', () => {
   currentAssistantRaw = '';
   currentSelection = null;
   attachedFiles = [];
+  for (const key of Object.keys(blockOpenState)) {
+    delete blockOpenState[key];
+  }
+  followBottom = true;
+  pauseFollowForExpandedTag = false;
   renderContextChips();
   setStreaming(false);
+  updateJumpToBottomButton();
 });
 
 switchSessionBtn.addEventListener('click', () => {
@@ -2299,6 +2671,27 @@ sendBtn.addEventListener('click', () => {
   } else {
     sendMessage();
   }
+});
+
+if (jumpToBottomBtn) {
+  jumpToBottomBtn.addEventListener('click', () => {
+    resumeAutoFollowAndJump();
+  });
+}
+
+messagesEl.addEventListener('scroll', () => {
+  if (isProgrammaticScroll) {
+    return;
+  }
+  const nearBottom = isNearBottom();
+  if (nearBottom) {
+    if (!pauseFollowForExpandedTag) {
+      followBottom = true;
+    }
+  } else {
+    followBottom = false;
+  }
+  updateJumpToBottomButton();
 });
 
 inputEl.addEventListener('keydown', (e) => {
@@ -2362,6 +2755,24 @@ inputEl.addEventListener('focus', () => {
 inputEl.addEventListener('blur', () => {
   vscode.postMessage({ type: 'inputBlur' });
 });
+if (modelSelect) {
+  modelSelect.addEventListener('change', persistRuntimeOptions);
+  modelSelect.addEventListener('focus', () => {
+    if (!isStreaming) {
+      requestRuntimeOptionsMeta(false);
+    }
+  });
+}
+if (refreshModelBtn) {
+  refreshModelBtn.addEventListener('click', () => {
+    if (!isStreaming) {
+      requestRuntimeOptionsMeta(true);
+    }
+  });
+}
+if (reasoningEffortSelect) {
+  reasoningEffortSelect.addEventListener('change', persistRuntimeOptions);
+}
 
 // Auto-resize textarea
 inputEl.addEventListener('input', () => {
@@ -2536,6 +2947,11 @@ function renderLoadedSession(session) {
   currentAssistantMetaEl = null;
   currentAssistantContentEl = null;
   currentAssistantRaw = '';
+  for (const key of Object.keys(blockOpenState)) {
+    delete blockOpenState[key];
+  }
+  followBottom = true;
+  pauseFollowForExpandedTag = false;
 
   const history = Array.isArray(session?.messages) ? session.messages : [];
   if (history.length === 0) {
@@ -2559,7 +2975,8 @@ function renderLoadedSession(session) {
       messagesEl.appendChild(el);
     }
   }
-  scrollToBottom();
+  scrollToBottom(true);
+  updateJumpToBottomButton();
 }
 
 // ── Messages from extension ──
@@ -2603,7 +3020,7 @@ window.addEventListener('message', (event) => {
       el.className = 'message error';
       el.textContent = data.text;
       messagesEl.appendChild(el);
-      scrollToBottom();
+      scrollToBottom(false);
       break;
     }
     case 'clearChat':
@@ -2618,8 +3035,14 @@ window.addEventListener('message', (event) => {
       currentAssistantRaw = '';
       currentSelection = null;
       attachedFiles = [];
+      for (const key of Object.keys(blockOpenState)) {
+        delete blockOpenState[key];
+      }
+      followBottom = true;
+      pauseFollowForExpandedTag = false;
       renderContextChips();
       setStreaming(false);
+      updateJumpToBottomButton();
       break;
     case 'selectionUpdate':
       currentSelection = data.selection;
@@ -2628,6 +3051,11 @@ window.addEventListener('message', (event) => {
     case 'filesUpdate':
       attachedFiles = data.files || [];
       renderContextChips();
+      break;
+    case 'runtimeOptionsMeta':
+      availableModels = Array.isArray(data.models) ? data.models : [];
+      renderModelOptions();
+      setModelRefreshState(false);
       break;
     case 'triggerSend':
       sendMessage();
