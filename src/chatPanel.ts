@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
+import * as fs from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
 
 /** Strip ANSI escape codes and carriage returns from a string */
@@ -16,6 +18,7 @@ interface ChatMessage {
 interface ChatRuntimeOptions {
   model?: string;
   reasoningEffort?: string;
+  skill?: string;
 }
 
 interface ChatSession {
@@ -38,6 +41,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'jumpHistoryChat';
   private static readonly sessionsStateKey = 'jumpHistory.chat.sessions';
   private static readonly modelOptionsStateKey = 'jumpHistory.chat.availableModels';
+  private static readonly skillOptionsStateKey = 'jumpHistory.chat.availableSkills';
   private static readonly maxSessions = 50;
   private static readonly stopGracePeriodMs = 1500;
   private static readonly stopForceKillMs = 4000;
@@ -53,6 +57,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private attachedFiles: string[] = [];
   private sessions: ChatSession[] = [];
   private availableModels: string[];
+  private availableSkills: string[];
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -60,6 +65,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.sessions = this.workspaceState.get<ChatSession[]>(ChatViewProvider.sessionsStateKey, []);
     this.availableModels = this.workspaceState.get<string[]>(ChatViewProvider.modelOptionsStateKey, []);
+    this.availableSkills = this.workspaceState.get<string[]>(ChatViewProvider.skillOptionsStateKey, []);
     this.sessionId = this.sessions[0]?.id ?? `vscode-${Date.now().toString(36)}`;
     if (this.sessions.length === 0) {
       this.sessions = [this.createSession(this.sessionId, 'New Chat')];
@@ -75,6 +81,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       updatedAt: Date.now(),
       messages: [],
     };
+  }
+
+  private deriveSessionTitle(text: string): string {
+    return text.slice(0, 28).trim() || 'New Chat';
   }
 
   private getCurrentSession(): ChatSession {
@@ -238,15 +248,79 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private async resolveAvailableSkills(): Promise<string[]> {
+    this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.env.HOME ?? '/';
+
+    return new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      try {
+        const child = cp.spawn(this.agentBinary, ['--list-skills'], {
+          cwd,
+          env: { ...process.env },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        const finish = (rawText: string) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          const matches = Array.from(
+            stripAnsi(rawText).matchAll(/^\s*(?:[│|]\s*)?([a-zA-Z0-9._-]+)\s+·\s+/gm),
+          ).map((match) => match[1]);
+          const unique = [...new Set(matches)];
+          resolve(unique);
+        };
+
+        const timer = setTimeout(() => {
+          try {
+            child.kill();
+          } catch {
+            // ignore
+          }
+          finish(`${stdout}\n${stderr}`);
+        }, 4000);
+
+        child.stdout?.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString();
+        });
+        child.stderr?.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+        child.on('error', () => {
+          clearTimeout(timer);
+          finish(`${stdout}\n${stderr}`);
+        });
+        child.on('close', () => {
+          clearTimeout(timer);
+          finish(`${stdout}\n${stderr}`);
+        });
+      } catch {
+        resolve([]);
+      }
+    });
+  }
+
   private async postRuntimeOptionsMeta(): Promise<void> {
-    const resolvedModels = await this.resolveAvailableModels();
+    const [resolvedModels, resolvedSkills] = await Promise.all([
+      this.resolveAvailableModels(),
+      this.resolveAvailableSkills(),
+    ]);
     if (resolvedModels.length > 0) {
       this.availableModels = resolvedModels;
       await this.workspaceState.update(ChatViewProvider.modelOptionsStateKey, resolvedModels);
     }
+    if (resolvedSkills.length > 0) {
+      this.availableSkills = resolvedSkills;
+      await this.workspaceState.update(ChatViewProvider.skillOptionsStateKey, resolvedSkills);
+    }
     this.view?.webview.postMessage({
       type: 'runtimeOptionsMeta',
       models: this.availableModels,
+      skills: this.availableSkills,
     });
   }
 
@@ -303,6 +377,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.handleUserMessage(data.text, {
             model: typeof data.model === 'string' ? data.model : undefined,
             reasoningEffort: typeof data.reasoningEffort === 'string' ? data.reasoningEffort : undefined,
+            skill: typeof data.skill === 'string' ? data.skill : undefined,
           });
           break;
         case 'stop':
@@ -328,6 +403,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'deleteSession':
           await this.deleteCurrentSession();
+          break;
+        case 'revertTurn':
+          await this.revertToUserTurn(Number(data.userTurnIndex));
           break;
         case 'removeFile':
           this.attachedFiles = this.attachedFiles.filter(f => f !== data.filePath);
@@ -578,6 +656,229 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async runSessionCommand(sessionId: string, commandText: string | string[]): Promise<void> {
+    this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.env.HOME ?? '/';
+
+    await new Promise<void>((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const commands = Array.isArray(commandText) ? commandText : [commandText];
+
+      const child = cp.spawn(this.agentBinary, ['--session', sessionId], {
+        cwd,
+        env: { ...process.env },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      const finish = (error?: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      };
+
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          // ignore
+        }
+        finish(new Error('Timed out waiting for agent command to finish.'));
+      }, 8000);
+
+      child.stdout?.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', (error) => {
+        finish(error);
+      });
+      child.on('close', (code) => {
+        const details = stripAnsi(`${stdout}\n${stderr}`).trim();
+        if (code === 0) {
+          if (/(?:^|\n)\s*(?:local command error|error):/i.test(details)) {
+            finish(new Error(details));
+            return;
+          }
+          finish();
+          return;
+        }
+        finish(new Error(details || `Agent command exited with code ${code ?? 'unknown'}.`));
+      });
+
+      child.stdin?.end(`${commands.map((command) => command.replace(/\n+$/g, '')).join('\n')}\n`);
+    });
+  }
+
+  private getHistoryStorageDir(): string {
+    return path.join(os.homedir(), '.history_file.sessions');
+  }
+
+  private getSessionDatabasePath(sessionId: string): string {
+    return path.join(this.getHistoryStorageDir(), `${sessionId}.sqlite`);
+  }
+
+  private async runSqliteStatement(databasePath: string, sql: string): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const child = cp.spawn('sqlite3', [databasePath, sql], {
+        cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.env.HOME ?? '/',
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      const finish = (error?: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      };
+
+      child.stdout?.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', (error) => finish(error));
+      child.on('close', (code) => {
+        const details = stripAnsi(`${stdout}\n${stderr}`).trim();
+        if (code === 0) {
+          finish();
+          return;
+        }
+        finish(new Error(details || `sqlite3 exited with code ${code ?? 'unknown'}.`));
+      });
+    });
+  }
+
+  private async forkBackendSessionBeforeUserTurn(sourceSessionId: string, targetSessionId: string, userTurnIndex: number): Promise<void> {
+    const sourceDatabasePath = this.getSessionDatabasePath(sourceSessionId);
+    const targetDatabasePath = this.getSessionDatabasePath(targetSessionId);
+    await fs.mkdir(this.getHistoryStorageDir(), { recursive: true });
+    await fs.copyFile(sourceDatabasePath, targetDatabasePath);
+
+    const sql = `
+      BEGIN;
+      DELETE FROM messages
+      WHERE id >= (
+        SELECT id
+        FROM messages
+        WHERE role = 'user'
+        ORDER BY id
+        LIMIT 1 OFFSET ${userTurnIndex}
+      );
+      DELETE FROM meta WHERE key = 'first_user_prompt';
+      INSERT INTO meta (key, value)
+      SELECT 'first_user_prompt', content
+      FROM messages
+      WHERE role = 'user'
+      ORDER BY id
+      LIMIT 1;
+      COMMIT;
+    `;
+    try {
+      await this.runSqliteStatement(targetDatabasePath, sql);
+    } catch (error) {
+      try {
+        await fs.unlink(targetDatabasePath);
+      } catch {
+        // ignore cleanup errors
+      }
+      throw error;
+    }
+  }
+
+  private getUserTurnMessageIndex(messages: ChatMessage[], userTurnIndex: number): number {
+    if (!Number.isInteger(userTurnIndex) || userTurnIndex < 0) {
+      return -1;
+    }
+    let currentTurn = 0;
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role !== 'user') {
+        continue;
+      }
+      if (currentTurn === userTurnIndex) {
+        return i;
+      }
+      currentTurn++;
+    }
+    return -1;
+  }
+
+  private getUserTurnCount(messages: ChatMessage[]): number {
+    return messages.filter((message) => message.role === 'user').length;
+  }
+
+  private rewindLocalSessionToTurn(session: ChatSession, userTurnIndex: number): boolean {
+    const previousMessages = session.messages.slice();
+    const targetMessageIndex = this.getUserTurnMessageIndex(previousMessages, userTurnIndex);
+    if (targetMessageIndex < 0) {
+      return false;
+    }
+
+    const previousFirstUser = previousMessages.find((message) => message.role === 'user');
+    const previousAutoTitle = previousFirstUser ? this.deriveSessionTitle(previousFirstUser.content) : 'New Chat';
+    const usingAutoTitle = session.title === previousAutoTitle;
+
+    session.messages = previousMessages.slice(0, targetMessageIndex);
+
+    if (usingAutoTitle) {
+      const nextFirstUser = session.messages.find((message) => message.role === 'user');
+      session.title = nextFirstUser ? this.deriveSessionTitle(nextFirstUser.content) : 'New Chat';
+    }
+
+    session.updatedAt = Date.now();
+    return true;
+  }
+
+  private async revertToUserTurn(userTurnIndex: number): Promise<void> {
+    if (this.isStreaming) {
+      vscode.window.showInformationMessage('Stop the current response before reverting a round.');
+      return;
+    }
+
+    const session = this.getCurrentSession();
+    const targetMessageIndex = this.getUserTurnMessageIndex(session.messages, userTurnIndex);
+    if (targetMessageIndex < 0) {
+      vscode.window.showInformationMessage('Cannot find that chat round in this session.');
+      return;
+    }
+
+    const previousSessionId = this.sessionId;
+    const nextSessionId = `vscode-${Date.now().toString(36)}`;
+    try {
+      await this.forkBackendSessionBeforeUserTurn(previousSessionId, nextSessionId, userTurnIndex);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Failed to revert the selected round: ${message}`);
+      return;
+    }
+
+    session.id = nextSessionId;
+    this.sessionId = nextSessionId;
+    this.rewindLocalSessionToTurn(session, userTurnIndex);
+    await this.saveSessions();
+    this.postCurrentSessionToWebview();
+  }
+
   private async handleUserMessage(text: string, runtimeOptions: ChatRuntimeOptions = {}): Promise<void> {
     if (!text.trim() || this.isStreaming) {
       return;
@@ -594,7 +895,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     session.messages.push({ role: 'user', content: text });
     session.updatedAt = Date.now();
     if (session.title === 'New Chat') {
-      session.title = text.slice(0, 28).trim() || 'New Chat';
+      session.title = this.deriveSessionTitle(text);
     }
     void this.saveSessions();
 
@@ -614,6 +915,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (reasoningEffort) {
       args.push('--reasoning-effort', reasoningEffort);
     }
+    const skill = runtimeOptions.skill?.trim();
 
     // Attach files via --files flag
     const allFiles = [...this.attachedFiles];
@@ -643,7 +945,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.currentProcess = child;
       this.clearStopEscalationTimer();
 
-      // Write the user message to stdin and close it
+      // Write any runtime commands, then the user message, then close stdin.
+      if (skill) {
+        child.stdin?.write(`/skills ${skill}\n`);
+      }
       child.stdin?.write(prompt + '\n');
       child.stdin?.end();
 
@@ -737,6 +1042,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let insideAidaTool = false;
       let insideToolResult = false;
       let insideToolCall = false;
+      let insidePlainToolTranscript = false;
 
       const closeAnyOpenBlocks = () => {
         if (insideThinking) {
@@ -753,6 +1059,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             insideToolCall = false;
           }
         }
+        if (insidePlainToolTranscript) {
+          endStructuredBlock();
+          insidePlainToolTranscript = false;
+        }
       };
 
       const processLine = (rawLine: string) => {
@@ -761,6 +1071,77 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const stripStreamPrefix = (value: string): string => {
           // Strip decorative stream prefixes (for tool/thinking output only).
           return value.replace(/^(?:>\s*)?(?:(?:\s*[\u2502\u2503\u2506\u250a\u254e\u254f|¦]\s+)+)/u, '');
+        };
+
+        const stripToolTranscriptLead = (value: string): string =>
+          value.replace(/^\|\s*/, '').trim();
+
+        const isPromptCacheLine = (value: string): boolean =>
+          /^promptcache$/i.test(value) ||
+          /^\d+\/\d+\s+prompt(?:\s+\w+)*\s+cached/i.test(value);
+
+        const isToolTranscriptLine = (value: string): boolean =>
+          /^\|\s*[a-z][a-z0-9_]*(?:\s|["{]|$)/i.test(value) ||
+          /^(web_search|call_tools|promptcache)$/i.test(value) ||
+          /^Start query=/i.test(value) ||
+          /^Attempt \d+\/\d+/i.test(value) ||
+          /^(ddg|searchxng|searxng)_[a-z0-9_ -]+/i.test(value);
+
+        const isStandaloneToolName = (value: string): boolean =>
+          /^(web_search|call_tools)$/i.test(value);
+
+        const maybeHandlePlainToolTranscript = (value: string): boolean => {
+          const trimmedValue = value.trim();
+          if (!trimmedValue) {
+            if (insidePlainToolTranscript) {
+              emitAssistantText('\n');
+              return true;
+            }
+            return false;
+          }
+
+          const toolCallsIndex = trimmedValue.toLowerCase().indexOf('tool calls');
+          if (toolCallsIndex >= 0) {
+            const prefix = trimmedValue
+              .slice(0, toolCallsIndex)
+              .replace(/[,\s._-]*$/g, '')
+              .trim();
+            if (prefix) {
+              emitAssistantText(`${prefix}\n`);
+            }
+            closeAnyOpenBlocks();
+            startStructuredBlock('tool', '🔧 Tool Calls');
+            insidePlainToolTranscript = true;
+            return true;
+          }
+
+          if (isPromptCacheLine(trimmedValue)) {
+            closeAnyOpenBlocks();
+            const normalized = /^promptcache$/i.test(trimmedValue)
+              ? 'prompt cache'
+              : trimmedValue;
+            postStatus(normalized);
+            return true;
+          }
+
+          if (!isToolTranscriptLine(trimmedValue)) {
+            if (insidePlainToolTranscript) {
+              closeAnyOpenBlocks();
+            }
+            return false;
+          }
+
+          if (!insidePlainToolTranscript) {
+            closeAnyOpenBlocks();
+            startStructuredBlock('tool', '🔧 Tool Calls');
+            insidePlainToolTranscript = true;
+          }
+
+          const normalized = stripToolTranscriptLead(trimmedValue);
+          if (!isStandaloneToolName(normalized)) {
+            emitAssistantText(`${normalized}\n`);
+          }
+          return true;
         };
 
         if (insideToolResult && (line.match(/^(?:>\s*)?╭─/) || line.match(/^(?:>\s*)?╰─/) || line.match(/^(?:>\s*)?\[Thinking\]/i) || line.match(/^(?:>\s*)?[*_]Thinking[*_]/i))) {
@@ -821,6 +1202,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (insideThinking) {
           const stripped = stripStreamPrefix(line);
           emitAssistantText(stripped + '\n');
+          return;
+        }
+
+        if (maybeHandlePlainToolTranscript(stripStreamPrefix(line))) {
           return;
         }
 
@@ -1169,6 +1554,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     opacity: 0.6;
   }
   .header-actions button:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
+  .header-actions button:disabled {
+    opacity: 0.3;
+    cursor: default;
+    background: none;
+  }
   .send-btn.stop-mode {
     background: transparent;
     color: var(--vscode-errorForeground);
@@ -1249,15 +1639,155 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     max-width: 100%;
     line-height: 1.5;
   }
-  .message.user {
+  .message.user-shell {
+    align-self: flex-end;
+    max-width: 85%;
+  }
+  .user-row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .user-bubble {
+    min-width: 0;
     background: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, transparent);
     border-radius: 8px;
     padding: 8px 12px;
-    align-self: flex-end;
-    max-width: 85%;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  .user-actions {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex: 0 0 64px;
+    width: 64px;
+  }
+  .message-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    height: 22px;
+    padding: 0 8px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    color: color-mix(in srgb, var(--vscode-foreground) 70%, transparent);
+    white-space: nowrap;
+    writing-mode: horizontal-tb;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(4px);
+    transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  }
+  .message.user-shell:hover .message-action,
+  .message.user-shell:focus-within .message-action,
+  .user-actions.confirm-open .message-action {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
+  }
+  .message-action:hover {
+    color: var(--vscode-foreground);
+    background: var(--vscode-toolbar-hoverBackground);
+    border-color: var(--vscode-panel-border);
+  }
+  .message-action:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 1px;
+  }
+  .revert-confirm[hidden] {
+    display: none;
+  }
+  .revert-confirm {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: min(220px, calc(100vw - 16px));
+    background: color-mix(in srgb, var(--vscode-editorHoverWidget-background, #252526) 98%, transparent);
+    color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+    border: 1px solid color-mix(in srgb, var(--vscode-widget-border, var(--vscode-panel-border)) 88%, transparent);
+    border-radius: 8px;
+    padding: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    z-index: 20;
+  }
+  .revert-confirm::after {
+    content: '';
+    position: absolute;
+    left: var(--revert-confirm-arrow-left, 24px);
+    width: 10px;
+    height: 10px;
+    background: color-mix(in srgb, var(--vscode-editorHoverWidget-background, #252526) 98%, transparent);
+  }
+  .revert-confirm.below::after {
+    top: -6px;
+    transform: rotate(45deg);
+    border-left: 1px solid color-mix(in srgb, var(--vscode-widget-border, var(--vscode-panel-border)) 88%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--vscode-widget-border, var(--vscode-panel-border)) 88%, transparent);
+  }
+  .revert-confirm.above::after {
+    bottom: -6px;
+    transform: rotate(45deg);
+    border-right: 1px solid color-mix(in srgb, var(--vscode-widget-border, var(--vscode-panel-border)) 88%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--vscode-widget-border, var(--vscode-panel-border)) 88%, transparent);
+  }
+  .revert-confirm-title {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .revert-confirm-detail {
+    font-size: 11px;
+    line-height: 1.4;
+    opacity: 0.86;
+  }
+  .revert-confirm-preview {
+    margin-top: 6px;
+    font-size: 11px;
+    line-height: 1.35;
+    opacity: 0.72;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .revert-confirm-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .revert-confirm-btn {
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 6px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    padding: 4px 10px;
+    font-size: 11px;
+    line-height: 1.2;
+    cursor: pointer;
+  }
+  .revert-confirm-btn:hover {
+    background: var(--vscode-button-hoverBackground);
+  }
+  .revert-confirm-btn.secondary {
+    background: transparent;
+    color: var(--vscode-foreground);
+    border-color: var(--vscode-panel-border);
+  }
+  .revert-confirm-btn.secondary:hover {
+    background: var(--vscode-toolbar-hoverBackground);
   }
   .message.assistant {
     padding: 4px 0;
@@ -1508,14 +2038,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   .input-toolbar {
     position: absolute;
     left: 12px;
-    right: 72px;
+    right: 46px;
     bottom: 12px;
     display: flex;
     gap: 2px;
     align-items: center;
     padding: 2px;
     width: fit-content;
-    max-width: calc(100% - 72px);
+    max-width: calc(100% - 46px);
     border: 1px solid rgba(127, 127, 127, 0.14);
     border-radius: 8px;
     background: rgba(127, 127, 127, 0.06);
@@ -1542,41 +2072,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     background-position: right 6px center;
   }
   .input-select.model-select {
-    flex: 0 1 118px;
+    flex: 0 1 104px;
+  }
+  .input-select.skill-select {
+    flex: 0 1 86px;
   }
   .input-select.reasoning-select {
-    flex: 0 0 78px;
+    flex: 0 1 84px;
   }
   .input-select:hover:not(:disabled),
   .input-select:focus {
     background-color: rgba(127, 127, 127, 0.10);
     color: var(--vscode-input-foreground);
-  }
-  .refresh-model-btn {
-    flex: 0 0 22px;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    background: transparent;
-    color: color-mix(in srgb, var(--vscode-input-foreground) 62%, transparent);
-    cursor: pointer;
-    pointer-events: auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 11px;
-    line-height: 1;
-  }
-  .refresh-model-btn:hover:not(:disabled) {
-    border-color: transparent;
-    background: rgba(127, 127, 127, 0.10);
-    color: var(--vscode-input-foreground);
-  }
-  .refresh-model-btn:disabled {
-    opacity: 0.38;
-    cursor: default;
   }
   textarea {
     width: 100%;
@@ -1586,7 +2093,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     color: var(--vscode-input-foreground);
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
-    padding: 12px 70px 44px 12px;
+    padding: 12px 40px 44px 12px;
     border-radius: 6px;
     outline: none;
     line-height: 1.4;
@@ -1655,31 +2162,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     right: 8px;
     bottom: 8px;
     display: flex;
-    gap: 6px;
+    gap: 4px;
     align-items: center;
   }
-  .add-file-btn, .send-btn {
+  .add-file-btn {
     background: var(--vscode-button-secondaryBackground);
     border: 1px solid var(--vscode-panel-border);
     color: var(--vscode-foreground);
     cursor: pointer;
-    font-size: 14px;
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
+    font-size: 11px;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
     opacity: 0.85;
     line-height: 1;
     display: inline-flex;
     align-items: center;
     justify-content: center;
   }
-  .send-btn {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border-color: transparent;
-  }
-  .add-file-btn:hover, .send-btn:hover { opacity: 1; border-color: var(--vscode-focusBorder); }
-  .add-file-btn:disabled, .send-btn:disabled { opacity: 0.3; cursor: default; }
+  .add-file-btn:hover { opacity: 1; border-color: var(--vscode-focusBorder); }
+  .add-file-btn:disabled { opacity: 0.3; cursor: default; }
 </style>
 </head>
 <body>
@@ -1712,7 +2214,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <select id="modelSelect" class="input-select model-select">
           <option value="">Default</option>
         </select>
-        <button id="refreshModelBtn" class="refresh-model-btn" title="Refresh models">⟳</button>
+        <select id="skillSelect" class="input-select skill-select">
+          <option value="">auto</option>
+        </select>
         <select id="reasoningEffortSelect" class="input-select reasoning-select">
           <option value="">Default</option>
           <option value="minimal">minimal</option>
@@ -1724,7 +2228,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       </div>
       <div class="input-actions">
         <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
-        <button class="send-btn" id="sendBtn" title="Send (Enter)">↑</button>
       </div>
     </div>
   </div>
@@ -1787,10 +2290,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const sessionTitleEl = document.getElementById('sessionTitle');
   const contextArea = document.getElementById('contextArea');
   const addFileBtn = document.getElementById('addFileBtn');
-  const sendBtn = document.getElementById('sendBtn');
   const jumpToBottomBtn = document.getElementById('jumpToBottomBtn');
   const modelSelect = document.getElementById('modelSelect');
-  const refreshModelBtn = document.getElementById('refreshModelBtn');
+  const skillSelect = document.getElementById('skillSelect');
   const reasoningEffortSelect = document.getElementById('reasoningEffortSelect');
 
   let isStreaming = false;
@@ -1807,6 +2309,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let followBottom = true;
   let pauseFollowForExpandedTag = false;
   let isProgrammaticScroll = false;
+  let openRevertActionsEl = null;
   const blockOpenState = Object.create(null);
   const nearBottomThreshold = 24;
 
@@ -1851,11 +2354,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   function setModelRefreshState(refreshing) {
     isRefreshingModels = refreshing;
-    if (refreshModelBtn) {
-      refreshModelBtn.disabled = refreshing || isStreaming;
-      refreshModelBtn.textContent = refreshing ? '…' : '⟳';
-      refreshModelBtn.title = refreshing ? 'Refreshing models...' : 'Refresh models';
-    }
   }
 
   function requestRuntimeOptionsMeta(forceRefresh) {
@@ -1880,13 +2378,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   let historyIndex = -1;
   let savedInput = '';
   let availableModels = [];
+  let availableSkills = [];
   let runtimeOptions = {
     model: typeof prevState.model === 'string' ? prevState.model : '',
-    reasoningEffort: typeof prevState.reasoningEffort === 'string' ? prevState.reasoningEffort : ''
+    reasoningEffort: typeof prevState.reasoningEffort === 'string' ? prevState.reasoningEffort : '',
+    skill: typeof prevState.skill === 'string' ? prevState.skill : ''
   };
 
   if (reasoningEffortSelect) {
     reasoningEffortSelect.value = runtimeOptions.reasoningEffort;
+  }
+
+  if (skillSelect) {
+    skillSelect.value = runtimeOptions.skill;
   }
 
   function renderModelOptions() {
@@ -1910,25 +2414,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
   renderModelOptions();
+
+  function renderSkillOptions() {
+    if (!skillSelect) {
+      return;
+    }
+    const currentValue = runtimeOptions.skill || '';
+    const merged = [''].concat(availableSkills || []);
+    if (currentValue && !merged.includes(currentValue)) {
+      merged.push(currentValue);
+    }
+    skillSelect.innerHTML = '';
+    merged.forEach((value) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value || 'auto';
+      if (value === currentValue) {
+        option.selected = true;
+      }
+      skillSelect.appendChild(option);
+    });
+  }
+  renderSkillOptions();
   setModelRefreshState(false);
 
   function persistHistory() {
     vscode.setState(Object.assign({}, vscode.getState() || {}, {
       inputHistory: inputHistory.slice(0, 100),
       model: runtimeOptions.model,
-      reasoningEffort: runtimeOptions.reasoningEffort
+      reasoningEffort: runtimeOptions.reasoningEffort,
+      skill: runtimeOptions.skill
     }));
   }
 
   function persistRuntimeOptions() {
     runtimeOptions = {
       model: modelSelect ? modelSelect.value : '',
-      reasoningEffort: reasoningEffortSelect ? reasoningEffortSelect.value : ''
+      reasoningEffort: reasoningEffortSelect ? reasoningEffortSelect.value : '',
+      skill: skillSelect ? skillSelect.value : ''
     };
     vscode.setState(Object.assign({}, vscode.getState() || {}, {
       inputHistory: inputHistory.slice(0, 100),
       model: runtimeOptions.model,
-      reasoningEffort: runtimeOptions.reasoningEffort
+      reasoningEffort: runtimeOptions.reasoningEffort,
+      skill: runtimeOptions.skill
     }));
   }
 
@@ -2387,6 +2916,18 @@ function createMarkdownSegment(text) {
   return wrapper;
 }
 
+function cleanStructuredBlockBody(text, blockType) {
+  const lines = text.replace(/\\n+$/g, '').split('\\n');
+  const cleaned = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (blockType === 'thinking' && /^(?:\\.{3}|…)$/.test(trimmed)) {
+      return false;
+    }
+    return true;
+  });
+  return cleaned.join('\\n').replace(/\\n+$/g, '');
+}
+
 function createBlockSegment(segment, blockKey) {
   const details = document.createElement('details');
   details.className = segment.blockType === 'thinking' ? 'thinking-details' : 'tool-details';
@@ -2399,12 +2940,14 @@ function createBlockSegment(segment, blockKey) {
   summary.textContent = segment.title;
   details.appendChild(summary);
 
-  const bodyText = segment.text.replace(/\\n+$/g, '');
+  const bodyText = cleanStructuredBlockBody(segment.text, segment.blockType);
   if (segment.blockType === 'thinking') {
-    const body = document.createElement('div');
-    body.className = 'thinking-body';
-    body.textContent = bodyText;
-    details.appendChild(body);
+    if (bodyText) {
+      const body = document.createElement('div');
+      body.className = 'thinking-body';
+      body.textContent = bodyText;
+      details.appendChild(body);
+    }
   } else {
     const pre = document.createElement('pre');
     const code = document.createElement('code');
@@ -2459,11 +3002,77 @@ function renderAssistantContent(container, rawText) {
 
 function addUserMessage(text) {
   if (welcomeEl) welcomeEl.style.display = 'none';
-  const el = document.createElement('div');
-  el.className = 'message user';
-  el.textContent = text;
-  messagesEl.appendChild(el);
+  const userTurnIndex = messagesEl.querySelectorAll('.message.user-shell').length;
+  messagesEl.appendChild(createUserMessage(text, userTurnIndex));
   scrollToBottom(true);
+}
+
+function createUserMessage(text, userTurnIndex) {
+  const shell = document.createElement('div');
+  shell.className = 'message user-shell';
+  shell.dataset.userTurnIndex = String(userTurnIndex);
+
+  const row = document.createElement('div');
+  row.className = 'user-row';
+
+  const actions = document.createElement('div');
+  actions.className = 'user-actions';
+
+  const revertBtn = document.createElement('button');
+  revertBtn.className = 'message-action';
+  revertBtn.type = 'button';
+  revertBtn.dataset.action = 'revertTurn';
+  revertBtn.dataset.userTurnIndex = String(userTurnIndex);
+  revertBtn.setAttribute('aria-label', 'Revert to the state before this round.');
+  revertBtn.textContent = 'Rewind';
+  actions.appendChild(revertBtn);
+
+  const confirm = document.createElement('div');
+  confirm.className = 'revert-confirm';
+  confirm.hidden = true;
+
+  const title = document.createElement('div');
+  title.className = 'revert-confirm-title';
+  title.textContent = 'Revert to the state before this round?';
+
+  const detail = document.createElement('div');
+  detail.className = 'revert-confirm-detail';
+
+  const preview = document.createElement('div');
+  preview.className = 'revert-confirm-preview';
+
+  const buttons = document.createElement('div');
+  buttons.className = 'revert-confirm-buttons';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'revert-confirm-btn secondary';
+  cancelBtn.dataset.action = 'cancelRevertTurn';
+  cancelBtn.textContent = 'Cancel';
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.type = 'button';
+  confirmBtn.className = 'revert-confirm-btn';
+  confirmBtn.dataset.action = 'confirmRevertTurn';
+  confirmBtn.dataset.userTurnIndex = String(userTurnIndex);
+  confirmBtn.textContent = 'Revert';
+
+  buttons.appendChild(cancelBtn);
+  buttons.appendChild(confirmBtn);
+  confirm.appendChild(title);
+  confirm.appendChild(detail);
+  confirm.appendChild(preview);
+  confirm.appendChild(buttons);
+  actions.appendChild(confirm);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'user-bubble';
+  bubble.textContent = text;
+
+  row.appendChild(actions);
+  row.appendChild(bubble);
+  shell.appendChild(row);
+  return shell;
 }
 
 function startAssistantMessage() {
@@ -2522,10 +3131,15 @@ function appendToAssistant(text) {
 
 function appendAssistantFlag(className, text) {
   if (!currentAssistantEl) startAssistantMessage();
-  const el = document.createElement('div');
-  el.className = className;
-  el.textContent = text;
-  currentAssistantMetaEl.appendChild(el);
+  const existing = currentAssistantMetaEl.querySelector('.' + className.replace(/\s+/g, '.'));
+  if (existing) {
+    existing.textContent = text;
+  } else {
+    const el = document.createElement('div');
+    el.className = className;
+    el.textContent = text;
+    currentAssistantMetaEl.appendChild(el);
+  }
   scrollToBottom(false);
 }
 
@@ -2535,27 +3149,104 @@ function escapeForRender(text) {
   return text;
 }
 
+function closeOpenRevertConfirm(exceptEl) {
+  if (!openRevertActionsEl || openRevertActionsEl === exceptEl) {
+    return;
+  }
+  const popover = openRevertActionsEl.querySelector('.revert-confirm');
+  if (popover) {
+    popover.hidden = true;
+    popover.classList.remove('above', 'below');
+    popover.style.left = '';
+    popover.style.top = '';
+    popover.style.setProperty('--revert-confirm-arrow-left', '24px');
+  }
+  openRevertActionsEl.classList.remove('confirm-open');
+  openRevertActionsEl = null;
+}
+
+function populateRevertConfirm(actionsEl) {
+  const revertBtn = actionsEl.querySelector('[data-action="revertTurn"]');
+  const detailEl = actionsEl.querySelector('.revert-confirm-detail');
+  const previewEl = actionsEl.querySelector('.revert-confirm-preview');
+  const shell = actionsEl.closest('.message.user-shell');
+  const bubble = shell ? shell.querySelector('.user-bubble') : null;
+  const userTurnIndex = Number(revertBtn ? revertBtn.dataset.userTurnIndex : '-1');
+  const totalUserTurns = messagesEl.querySelectorAll('.message.user-shell').length;
+  const removedCount = Number.isInteger(userTurnIndex) && userTurnIndex >= 0
+    ? Math.max(1, totalUserTurns - userTurnIndex)
+    : 1;
+  if (detailEl) {
+    detailEl.textContent = removedCount > 1
+      ? 'This removes this prompt and all later rounds.'
+      : 'This removes this prompt from the current session.';
+  }
+  if (previewEl) {
+    const preview = (bubble && bubble.textContent ? bubble.textContent : '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    previewEl.textContent = preview;
+    previewEl.hidden = !preview;
+  }
+}
+
+function openRevertConfirm(actionsEl) {
+  if (!actionsEl) {
+    return;
+  }
+  closeOpenRevertConfirm(actionsEl);
+  populateRevertConfirm(actionsEl);
+  const revertBtn = actionsEl.querySelector('[data-action="revertTurn"]');
+  const popover = actionsEl.querySelector('.revert-confirm');
+  if (!popover || !revertBtn) {
+    return;
+  }
+  popover.hidden = false;
+  popover.classList.remove('above', 'below');
+  popover.style.visibility = 'hidden';
+  popover.style.left = '0px';
+  popover.style.top = '0px';
+
+  const spacing = 8;
+  const viewportPadding = 8;
+  const buttonRect = revertBtn.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+  const maxLeft = Math.max(viewportPadding, window.innerWidth - popoverRect.width - viewportPadding);
+  const preferredLeft = buttonRect.left - 12;
+  const left = Math.max(viewportPadding, Math.min(preferredLeft, maxLeft));
+  const openBelow = window.innerHeight - buttonRect.bottom >= popoverRect.height + spacing + viewportPadding;
+  const top = openBelow
+    ? buttonRect.bottom + spacing
+    : Math.max(viewportPadding, buttonRect.top - popoverRect.height - spacing);
+  const arrowLeft = Math.max(
+    14,
+    Math.min(buttonRect.left + buttonRect.width / 2 - left - 5, popoverRect.width - 20)
+  );
+
+  popover.classList.add(openBelow ? 'below' : 'above');
+  popover.style.left = String(left) + 'px';
+  popover.style.top = String(top) + 'px';
+  popover.style.setProperty('--revert-confirm-arrow-left', String(arrowLeft) + 'px');
+  popover.style.visibility = '';
+  actionsEl.classList.add('confirm-open');
+  openRevertActionsEl = actionsEl;
+}
+
 function setStreaming(val) {
+  if (val) {
+    closeOpenRevertConfirm();
+  }
   isStreaming = val;
   inputEl.disabled = val;
   addFileBtn.disabled = val;
   if (modelSelect) {
     modelSelect.disabled = val;
   }
-  if (refreshModelBtn) {
-    refreshModelBtn.disabled = val || isRefreshingModels;
+  if (skillSelect) {
+    skillSelect.disabled = val;
   }
   if (reasoningEffortSelect) {
     reasoningEffortSelect.disabled = val;
   }
-  if (val) {
-    sendBtn.textContent = '■';
-    sendBtn.title = 'Stop generating';
-    sendBtn.classList.add('stop-mode');
-  } else {
-    sendBtn.textContent = '↑';
-    sendBtn.title = 'Send (Enter)';
-    sendBtn.classList.remove('stop-mode');
+  if (!val) {
     inputEl.focus();
   }
 }
@@ -2604,7 +3295,8 @@ function sendMessage() {
       type: 'sendMessage',
       text,
       model: runtimeOptions.model,
-      reasoningEffort: runtimeOptions.reasoningEffort
+      reasoningEffort: runtimeOptions.reasoningEffort,
+      skill: runtimeOptions.skill
     });
     inputEl.value = '';
     inputEl.style.height = 'auto';
@@ -2624,6 +3316,7 @@ function sendMessage() {
 // ── Event handlers ──
 newChatBtn.addEventListener('click', () => {
   vscode.postMessage({ type: 'newSession' });
+  closeOpenRevertConfirm();
   messagesEl.innerHTML = '';
   if (welcomeEl) {
     messagesEl.appendChild(welcomeEl);
@@ -2661,18 +3354,6 @@ addFileBtn.addEventListener('click', () => {
   vscode.postMessage({ type: 'addFile' });
 });
 
-sendBtn.addEventListener('click', () => {
-  sendBtn.classList.remove('vibrate');
-  void sendBtn.offsetWidth; // Trigger reflow to restart animation
-  sendBtn.classList.add('vibrate');
-
-  if (isStreaming) {
-    vscode.postMessage({ type: 'stop' });
-  } else {
-    sendMessage();
-  }
-});
-
 if (jumpToBottomBtn) {
   jumpToBottomBtn.addEventListener('click', () => {
     resumeAutoFollowAndJump();
@@ -2680,6 +3361,9 @@ if (jumpToBottomBtn) {
 }
 
 messagesEl.addEventListener('scroll', () => {
+  if (openRevertActionsEl) {
+    closeOpenRevertConfirm();
+  }
   if (isProgrammaticScroll) {
     return;
   }
@@ -2763,15 +3447,16 @@ if (modelSelect) {
     }
   });
 }
-if (refreshModelBtn) {
-  refreshModelBtn.addEventListener('click', () => {
-    if (!isStreaming) {
-      requestRuntimeOptionsMeta(true);
-    }
-  });
-}
 if (reasoningEffortSelect) {
   reasoningEffortSelect.addEventListener('change', persistRuntimeOptions);
+}
+if (skillSelect) {
+  skillSelect.addEventListener('change', persistRuntimeOptions);
+  skillSelect.addEventListener('focus', () => {
+    if (!isStreaming) {
+      requestRuntimeOptionsMeta(false);
+    }
+  });
 }
 
 // Auto-resize textarea
@@ -2930,6 +3615,43 @@ contextArea.addEventListener('click', (e) => {
 
 // ── File path click handler ──
 messagesEl.addEventListener('click', (e) => {
+  const cancelRevertBtn = e.target.closest('[data-action="cancelRevertTurn"]');
+  if (cancelRevertBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeOpenRevertConfirm();
+    return;
+  }
+
+  const confirmRevertBtn = e.target.closest('[data-action="confirmRevertTurn"]');
+  if (confirmRevertBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isStreaming) {
+      const userTurnIndex = Number(confirmRevertBtn.dataset.userTurnIndex);
+      closeOpenRevertConfirm();
+      if (Number.isInteger(userTurnIndex) && userTurnIndex >= 0) {
+        vscode.postMessage({ type: 'revertTurn', userTurnIndex });
+      }
+    }
+    return;
+  }
+
+  const revertBtn = e.target.closest('[data-action="revertTurn"]');
+  if (revertBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isStreaming) {
+      const actionsEl = revertBtn.closest('.user-actions');
+      if (actionsEl === openRevertActionsEl) {
+        closeOpenRevertConfirm();
+      } else {
+        openRevertConfirm(actionsEl);
+      }
+    }
+    return;
+  }
+
   const link = e.target.closest('.file-link');
   if (!link) return;
   e.preventDefault();
@@ -2938,7 +3660,29 @@ messagesEl.addEventListener('click', (e) => {
   vscode.postMessage({ type: 'openFile', filePath: fp, line: ln });
 });
 
+document.addEventListener('click', (e) => {
+  if (!openRevertActionsEl) {
+    return;
+  }
+  if (e.target.closest('.user-actions')) {
+    return;
+  }
+  closeOpenRevertConfirm();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !openRevertActionsEl) {
+    return;
+  }
+  closeOpenRevertConfirm();
+});
+
+window.addEventListener('resize', () => {
+  closeOpenRevertConfirm();
+});
+
 function renderLoadedSession(session) {
+  closeOpenRevertConfirm();
   messagesEl.innerHTML = '';
   if (sessionTitleEl) {
     sessionTitleEl.textContent = session?.title || 'New Chat';
@@ -2962,9 +3706,11 @@ function renderLoadedSession(session) {
     return;
   }
 
+  let userTurnIndex = 0;
   for (const msg of history) {
     if (msg.role === 'user') {
-      addUserMessage(msg.content);
+      messagesEl.appendChild(createUserMessage(msg.content, userTurnIndex));
+      userTurnIndex += 1;
     } else {
       const el = document.createElement('div');
       el.className = 'message assistant';
@@ -3024,6 +3770,7 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'clearChat':
+      closeOpenRevertConfirm();
       messagesEl.innerHTML = '';
       if (welcomeEl) {
         messagesEl.appendChild(welcomeEl);
@@ -3054,7 +3801,9 @@ window.addEventListener('message', (event) => {
       break;
     case 'runtimeOptionsMeta':
       availableModels = Array.isArray(data.models) ? data.models : [];
+      availableSkills = Array.isArray(data.skills) ? data.skills : [];
       renderModelOptions();
+      renderSkillOptions();
       setModelRefreshState(false);
       break;
     case 'triggerSend':
