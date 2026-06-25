@@ -1074,25 +1074,57 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         };
 
         const stripToolTranscriptLead = (value: string): string =>
-          value.replace(/^\|\s*/, '').trim();
+          value.replace(/^\s*\|\s*/, '').trim();
 
         const isPromptCacheLine = (value: string): boolean =>
           /^promptcache$/i.test(value) ||
+          /^\[prompt\s*cache\](?:\s+\d+\/\d+\s+prompt(?:\s+\w+)*\s+cached.*)?$/i.test(value) ||
           /^\d+\/\d+\s+prompt(?:\s+\w+)*\s+cached/i.test(value);
 
-        const isToolTranscriptLine = (value: string): boolean =>
-          /^\|\s*[a-z][a-z0-9_]*(?:\s|["{]|$)/i.test(value) ||
-          /^(web_search|call_tools|promptcache)$/i.test(value) ||
-          /^Start query=/i.test(value) ||
-          /^Attempt \d+\/\d+/i.test(value) ||
-          /^(ddg|searchxng|searxng)_[a-z0-9_ -]+/i.test(value);
+        const normalizeToolTranscriptValue = (rawValue: string): string => {
+          const trimmedRawValue = rawValue.trim();
+          if (trimmedRawValue.startsWith('|')) {
+            return stripToolTranscriptLead(trimmedRawValue);
+          }
+          const strippedValue = stripStreamPrefix(rawValue).trim();
+          return stripToolTranscriptLead(strippedValue || trimmedRawValue);
+        };
+
+        const isToolPathLikeLine = (value: string): boolean =>
+          /^(?:~?\/|\.{1,2}\/|[A-Za-z0-9_.-]+\/)[^\s]*$/.test(value) ||
+          /^[A-Za-z]:\\[^\s]*$/.test(value);
+
+        const isToolTranscriptStartLine = (rawValue: string): boolean => {
+          const normalizedValue = normalizeToolTranscriptValue(rawValue);
+          return /^\s*\|\s*[a-z_][a-z0-9_]*(?:\s*(?:\(|["{])|$)/i.test(rawValue) ||
+            /^(web_search|call_tools|promptcache)$/i.test(normalizedValue) ||
+            /^[a-z][a-z0-9_]*\s*\(/i.test(normalizedValue) ||
+            /^Start query=/i.test(normalizedValue) ||
+            /^Attempt \d+\/\d+/i.test(normalizedValue) ||
+            /^(ddg|searchxng|searxng)_[a-z0-9_ -]+/i.test(normalizedValue);
+        };
+
+        const isToolTranscriptContinuationLine = (rawValue: string): boolean => {
+          const normalizedValue = normalizeToolTranscriptValue(rawValue);
+          return isToolTranscriptStartLine(rawValue) ||
+            /^\s*\|\s*\S/.test(rawValue) ||
+            isToolPathLikeLine(normalizedValue) ||
+            /^[{\[]/.test(normalizedValue) ||
+            /^["'`]/.test(normalizedValue) ||
+            /^[a-z0-9_.-]+\s*:\s*\S/i.test(normalizedValue);
+        };
+
+        const isToolTranscriptLine = (rawValue: string): boolean =>
+          insidePlainToolTranscript
+            ? isToolTranscriptContinuationLine(rawValue)
+            : isToolTranscriptStartLine(rawValue);
 
         const isStandaloneToolName = (value: string): boolean =>
           /^(web_search|call_tools)$/i.test(value);
 
-        const maybeHandlePlainToolTranscript = (value: string): boolean => {
-          const trimmedValue = value.trim();
-          if (!trimmedValue) {
+        const maybeHandlePlainToolTranscript = (rawValue: string): boolean => {
+          const normalizedValue = normalizeToolTranscriptValue(rawValue);
+          if (!normalizedValue) {
             if (insidePlainToolTranscript) {
               emitAssistantText('\n');
               return true;
@@ -1100,9 +1132,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return false;
           }
 
-          const toolCallsIndex = trimmedValue.toLowerCase().indexOf('tool calls');
+          const toolCallsIndex = normalizedValue.toLowerCase().indexOf('tool calls');
           if (toolCallsIndex >= 0) {
-            const prefix = trimmedValue
+            const prefix = normalizedValue
               .slice(0, toolCallsIndex)
               .replace(/[,\s._-]*$/g, '')
               .trim();
@@ -1115,16 +1147,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return true;
           }
 
-          if (isPromptCacheLine(trimmedValue)) {
+          if (isPromptCacheLine(normalizedValue)) {
             closeAnyOpenBlocks();
-            const normalized = /^promptcache$/i.test(trimmedValue)
+            const normalized = /^promptcache$/i.test(normalizedValue)
               ? 'prompt cache'
-              : trimmedValue;
+              : normalizedValue;
             postStatus(normalized);
             return true;
           }
 
-          if (!isToolTranscriptLine(trimmedValue)) {
+          if (!isToolTranscriptLine(rawValue)) {
             if (insidePlainToolTranscript) {
               closeAnyOpenBlocks();
             }
@@ -1137,9 +1169,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             insidePlainToolTranscript = true;
           }
 
-          const normalized = stripToolTranscriptLead(trimmedValue);
-          if (!isStandaloneToolName(normalized)) {
-            emitAssistantText(`${normalized}\n`);
+          if (!isStandaloneToolName(normalizedValue)) {
+            emitAssistantText(`${normalizedValue}\n`);
           }
           return true;
         };
@@ -1205,7 +1236,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
-        if (maybeHandlePlainToolTranscript(stripStreamPrefix(line))) {
+        if (maybeHandlePlainToolTranscript(line)) {
           return;
         }
 
@@ -1366,10 +1397,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           endStructuredBlock();
           insideThinking = false;
         }
-        if (insideAidaTool || insideToolResult || insideToolCall) {
+        if (insideAidaTool || insideToolResult || insideToolCall || insidePlainToolTranscript) {
           endStructuredBlock();
           insideAidaTool = false;
           insideToolResult = false;
+          insidePlainToolTranscript = false;
           insideToolCall = false;
         }
 
@@ -1870,6 +1902,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   .tool-details pre {
     margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .tool-details pre code {
+    white-space: inherit;
   }
 
   /* Tool indicator */
@@ -2948,7 +2985,7 @@ function createBlockSegment(segment, blockKey) {
       body.textContent = bodyText;
       details.appendChild(body);
     }
-  } else {
+  } else if (bodyText) {
     const pre = document.createElement('pre');
     const code = document.createElement('code');
     code.textContent = bodyText;
