@@ -1093,25 +1093,66 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const isToolPathLikeLine = (value: string): boolean =>
           /^(?:~?\/|\.{1,2}\/|[A-Za-z0-9_.-]+\/)[^\s]*$/.test(value) ||
           /^[A-Za-z]:\\[^\s]*$/.test(value);
+        const isMarkdownTableLikeLine = (rawValue: string): boolean => {
+          const trimmedValue = rawValue.trim();
+          if (!trimmedValue.startsWith('|')) {
+            return false;
+          }
+          const body = trimmedValue.replace(/^\|/, '').replace(/\|$/, '');
+          const cells = body.split('|').map((cell) => cell.trim());
+          return cells.length >= 2 && cells.every((cell) => cell.length > 0 || /^:?-+:?$/.test(cell));
+        };
+        const isBoxDrawingPrefixedToolLine = (rawValue: string): boolean =>
+          /^\s*[│┃┆┊╎╏¦]\s*\S/u.test(rawValue);
+        const isAsciiPipePrefixedToolLine = (rawValue: string): boolean =>
+          /^\s*\|\s*\S/.test(rawValue);
+        const isPipePrefixedToolLine = (rawValue: string): boolean =>
+          isBoxDrawingPrefixedToolLine(rawValue) || isAsciiPipePrefixedToolLine(rawValue);
+        const isToolTranscriptStatusLine = (value: string): boolean =>
+          /^(?:result|output)\s*:/i.test(value) ||
+          /^\[(Completed|Running|Failed)\]/i.test(value);
+        const isToolTranscriptFragment = (value: string): boolean =>
+          isToolPathLikeLine(value) ||
+          /^[{\[]/.test(value) ||
+          /^["'`]/.test(value) ||
+          /^[a-z0-9_.-]+\s*:\s*\S/i.test(value) ||
+          /^(?:\.\.\.\s*)?\d+\s+lines?\s+folded\b/i.test(value) ||
+          /^\d+\s+\S/.test(value) ||
+          /^(?:error|warning|stderr|stdout|traceback)\b[: ]/i.test(value) ||
+          /^(?:no such file|permission denied|command not found|exit code\b)/i.test(value);
+        const isStandaloneToolTranscriptStartLine = (rawValue: string): boolean => {
+          const normalizedValue = normalizeToolTranscriptValue(rawValue);
+          if (isToolTranscriptStatusLine(normalizedValue)) {
+            return false;
+          }
+          if (isBoxDrawingPrefixedToolLine(rawValue)) {
+            return true;
+          }
+          if (!isAsciiPipePrefixedToolLine(rawValue)) {
+            return false;
+          }
+          if (isAsciiPipePrefixedToolLine(rawValue) && isMarkdownTableLikeLine(rawValue)) {
+            return false;
+          }
+          return isToolTranscriptFragment(normalizedValue);
+        };
 
         const isToolTranscriptStartLine = (rawValue: string): boolean => {
           const normalizedValue = normalizeToolTranscriptValue(rawValue);
-          return /^\s*\|\s*[a-z_][a-z0-9_]*(?:\s*(?:\(|["{])|$)/i.test(rawValue) ||
+          return /^\s*[│┃┆┊╎╏|¦]\s*[a-z_][a-z0-9_]*(?:\s*(?:\(|["{])|$)/iu.test(rawValue) ||
             /^(web_search|call_tools|promptcache)$/i.test(normalizedValue) ||
             /^[a-z][a-z0-9_]*\s*\(/i.test(normalizedValue) ||
             /^Start query=/i.test(normalizedValue) ||
             /^Attempt \d+\/\d+/i.test(normalizedValue) ||
-            /^(ddg|searchxng|searxng)_[a-z0-9_ -]+/i.test(normalizedValue);
+            /^(ddg|searchxng|searxng)_[a-z0-9_ -]+/i.test(normalizedValue) ||
+            isStandaloneToolTranscriptStartLine(rawValue);
         };
 
         const isToolTranscriptContinuationLine = (rawValue: string): boolean => {
           const normalizedValue = normalizeToolTranscriptValue(rawValue);
           return isToolTranscriptStartLine(rawValue) ||
-            /^\s*\|\s*\S/.test(rawValue) ||
-            isToolPathLikeLine(normalizedValue) ||
-            /^[{\[]/.test(normalizedValue) ||
-            /^["'`]/.test(normalizedValue) ||
-            /^[a-z0-9_.-]+\s*:\s*\S/i.test(normalizedValue);
+            isPipePrefixedToolLine(rawValue) ||
+            isToolTranscriptFragment(normalizedValue);
         };
 
         const isToolTranscriptLine = (rawValue: string): boolean =>
@@ -1144,6 +1185,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             closeAnyOpenBlocks();
             startStructuredBlock('tool', '🔧 Tool Calls');
             insidePlainToolTranscript = true;
+            return true;
+          }
+
+          const lowerNormalizedValue = normalizedValue.toLowerCase();
+          const toolOutputIndex = lowerNormalizedValue.indexOf('tool output');
+          const toolResultIndex = lowerNormalizedValue.indexOf('tool result');
+          const toolOutputMarkerIndex = toolOutputIndex >= 0 ? toolOutputIndex : toolResultIndex;
+          if (toolOutputMarkerIndex >= 0 &&
+            isPipePrefixedToolLine(rawValue) &&
+            !(isAsciiPipePrefixedToolLine(rawValue) && isMarkdownTableLikeLine(rawValue))) {
+            const prefix = normalizedValue
+              .slice(0, toolOutputMarkerIndex)
+              .replace(/[,\s._-]*$/g, '')
+              .trim();
+            if (prefix) {
+              emitAssistantText(`${prefix}\n`);
+            }
+            closeAnyOpenBlocks();
+            insideToolResult = true;
+            startStructuredBlock('tool', '📄 Tool Output');
             return true;
           }
 
@@ -1236,6 +1297,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
+        const trimmed = line.trim();
+        const normalizedToolLine = normalizeToolTranscriptValue(line);
+        const isAssistantHeaderLine = /^(?:>\s*)?\[[^\]]+\(search:\s*(true|false)[^\]]*\)\]$/i.test(trimmed);
+
+        if (isAssistantHeaderLine && (insidePlainToolTranscript || insideToolResult || insideToolCall || insideAidaTool)) {
+          closeAnyOpenBlocks();
+        }
+
+        if (insideToolResult &&
+          (/^(?:>\s*)?[╭╰]─/.test(trimmed) || /^(?:>\s*)?\[(Completed|Running|Failed)\]/i.test(trimmed))) {
+          closeAnyOpenBlocks();
+        }
+
+        if (/^output:\s*(streaming command output|tool result)/i.test(normalizedToolLine)) {
+          closeAnyOpenBlocks();
+          insideToolResult = true;
+          startStructuredBlock('tool', '📄 Tool Output');
+          return;
+        }
+
+        if (insideToolResult) {
+          emitAssistantText(normalizedToolLine + '\n');
+          return;
+        }
+
         if (maybeHandlePlainToolTranscript(line)) {
           return;
         }
@@ -1283,7 +1369,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         // Normalize and emit status flags as badges instead of mixing into assistant text
-        const trimmed = line.trim();
         if (/^(?:>\s*)?[│|]\s*result\s*:/i.test(trimmed)) {
           closeAnyOpenBlocks();
           postStatus(stripStreamPrefix(trimmed));
@@ -1294,7 +1379,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           postStatus(trimmed.replace(/^(?:>\s*)?/, ''));
           return;
         }
-        if (/^(?:>\s*)?\[[^\]]+\(search:\s*(true|false)\)\]$/i.test(trimmed)) {
+        if (isAssistantHeaderLine) {
           closeAnyOpenBlocks();
           postStatus(trimmed.replace(/^(?:>\s*)?/, ''));
           return;
@@ -1309,20 +1394,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }
           return;
         }
-        // Ignore the 'output: streaming command output' prefix and 'is asking the same question again' log that Minimax might emit directly
-        if (/^(?:>\s*)?[│|]\s*output: (streaming command output|tool result)/i.test(trimmed)) {
-          closeAnyOpenBlocks();
-          insideToolResult = true;
-          startStructuredBlock('tool', '📄 Tool Output');
-          return;
-        }
-
-        if (insideToolResult) {
-          const stripped = stripStreamPrefix(line);
-          emitAssistantText(stripped + '\n');
-          return;
-        }
-
         if (line.match(/^(?:>\s*)?╭─\s*(mcp|assistant)/)) {
           closeAnyOpenBlocks();
           return;
