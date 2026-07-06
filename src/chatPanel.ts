@@ -248,7 +248,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async resolveAvailableSkills(): Promise<string[]> {
+  private async resolveAvailableSkills(): Promise<string[] | null> {
     this.agentBinary = vscode.workspace.getConfiguration('jumpHistory').get<string>('agentBinaryPath', 'a');
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.env.HOME ?? '/';
 
@@ -263,11 +263,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           stdio: ['ignore', 'pipe', 'pipe'],
         });
 
-        const finish = (rawText: string) => {
+        const finish = (rawText: string, success: boolean) => {
           if (settled) {
             return;
           }
           settled = true;
+          if (!success) {
+            resolve(null);
+            return;
+          }
           const matches = Array.from(
             stripAnsi(rawText).matchAll(/^\s*(?:[│|]\s*)?([a-zA-Z0-9._-]+)\s+·\s+/gm),
           ).map((match) => match[1]);
@@ -281,7 +285,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           } catch {
             // ignore
           }
-          finish(`${stdout}\n${stderr}`);
+          finish(`${stdout}\n${stderr}`, false);
         }, 4000);
 
         child.stdout?.on('data', (chunk: Buffer) => {
@@ -292,14 +296,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
         child.on('error', () => {
           clearTimeout(timer);
-          finish(`${stdout}\n${stderr}`);
+          finish(`${stdout}\n${stderr}`, false);
         });
-        child.on('close', () => {
+        child.on('close', (code) => {
           clearTimeout(timer);
-          finish(`${stdout}\n${stderr}`);
+          finish(`${stdout}\n${stderr}`, code === 0);
         });
       } catch {
-        resolve([]);
+        resolve(null);
       }
     });
   }
@@ -313,7 +317,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.availableModels = resolvedModels;
       await this.workspaceState.update(ChatViewProvider.modelOptionsStateKey, resolvedModels);
     }
-    if (resolvedSkills.length > 0) {
+    if (resolvedSkills !== null) {
       this.availableSkills = resolvedSkills;
       await this.workspaceState.update(ChatViewProvider.skillOptionsStateKey, resolvedSkills);
     }
@@ -1657,20 +1661,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     opacity: 0.6;
   }
   .header-actions button:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
-  .header-actions button:disabled {
-    opacity: 0.3;
-    cursor: default;
-    background: none;
-  }
-  .send-btn.stop-mode {
-    background: transparent;
-    color: var(--vscode-errorForeground);
-    border-color: var(--vscode-inputValidation-errorBorder, transparent);
-  }
-  .send-btn.stop-mode:hover {
-    background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground, transparent) 60%, transparent);
-    border-color: transparent;
-  }
+    .header-actions button:disabled {
+      opacity: 0.3;
+      cursor: default;
+      background: none;
+    }
+    .send-btn {
+      width: 22px;
+      min-width: 22px;
+      height: 22px;
+      padding: 0;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      background: var(--vscode-button-background, var(--vscode-button-secondaryBackground));
+      color: var(--vscode-button-foreground, var(--vscode-foreground));
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+    }
+    .send-btn:hover:not(:disabled) {
+      background: var(--vscode-button-hoverBackground, var(--vscode-button-background, var(--vscode-button-secondaryBackground)));
+    }
+    .send-btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .send-btn.stop-mode {
+      background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground, transparent) 58%, var(--vscode-button-secondaryBackground, transparent));
+      color: var(--vscode-errorForeground);
+      border-color: var(--vscode-inputValidation-errorBorder, transparent);
+    }
+    .send-btn.stop-mode:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground, transparent) 74%, var(--vscode-button-secondaryBackground, transparent));
+    }
   .send-btn:active {
     transform: scale(0.9);
   }
@@ -2143,22 +2171,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     flex: 1;
     position: relative;
   }
-  .input-toolbar {
-    position: absolute;
-    left: 12px;
-    right: 46px;
-    bottom: 12px;
-    display: flex;
-    gap: 2px;
-    align-items: center;
-    padding: 2px;
-    width: fit-content;
-    max-width: calc(100% - 46px);
-    border: 1px solid rgba(127, 127, 127, 0.14);
-    border-radius: 8px;
-    background: rgba(127, 127, 127, 0.06);
-    pointer-events: none;
-  }
+    .input-toolbar {
+      position: absolute;
+      left: 12px;
+      right: 62px;
+      bottom: 12px;
+      display: flex;
+      gap: 2px;
+      align-items: center;
+      padding: 2px;
+      width: fit-content;
+      max-width: calc(100% - 62px);
+      border: 1px solid rgba(127, 127, 127, 0.14);
+      border-radius: 8px;
+      background: rgba(127, 127, 127, 0.06);
+      pointer-events: none;
+    }
   .input-select {
     min-width: 0;
     max-width: 100%;
@@ -2193,22 +2221,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     background-color: rgba(127, 127, 127, 0.10);
     color: var(--vscode-input-foreground);
   }
-  textarea {
-    width: 100%;
-    resize: none;
-    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-    background: var(--vscode-input-background);
-    color: var(--vscode-input-foreground);
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    padding: 12px 40px 44px 12px;
-    border-radius: 6px;
-    outline: none;
-    line-height: 1.4;
-    min-height: 108px;
-    max-height: 200px;
-    overflow-y: auto;
-  }
+    textarea {
+      width: 100%;
+      resize: none;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      padding: 12px 66px 44px 12px;
+      border-radius: 6px;
+      outline: none;
+      line-height: 1.4;
+      min-height: 108px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
   textarea:focus { border-color: var(--vscode-focusBorder); }
   textarea::placeholder { color: var(--vscode-input-placeholderForeground); }
 
@@ -2265,14 +2293,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   .context-chip.selection { background: var(--vscode-textPreformat-background, var(--vscode-badge-background)); }
   .context-chip.file { background: var(--vscode-badge-background); }
-  .input-actions {
-    position: absolute;
-    right: 8px;
-    bottom: 8px;
-    display: flex;
-    gap: 4px;
-    align-items: center;
-  }
+    .input-actions {
+      position: absolute;
+      right: 8px;
+      bottom: 8px;
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
   .add-file-btn {
     background: var(--vscode-button-secondaryBackground);
     border: 1px solid var(--vscode-panel-border);
@@ -2335,7 +2363,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         </select>
       </div>
       <div class="input-actions">
-        <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
+          <button class="add-file-btn" id="addFileBtn" title="Attach files (+)">+</button>
+          <button class="send-btn" id="composeBtn" type="button" title="发送消息" aria-label="发送消息" disabled>↑</button>
       </div>
     </div>
   </div>
@@ -2398,6 +2427,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   const sessionTitleEl = document.getElementById('sessionTitle');
   const contextArea = document.getElementById('contextArea');
   const addFileBtn = document.getElementById('addFileBtn');
+    const composeBtn = document.getElementById('composeBtn');
   const jumpToBottomBtn = document.getElementById('jumpToBottomBtn');
   const modelSelect = document.getElementById('modelSelect');
   const skillSelect = document.getElementById('skillSelect');
@@ -2523,51 +2553,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
   renderModelOptions();
 
-  function renderSkillOptions() {
-    if (!skillSelect) {
-      return;
-    }
-    const currentValue = runtimeOptions.skill || '';
-    const merged = [''].concat(availableSkills || []);
-    if (currentValue && !merged.includes(currentValue)) {
-      merged.push(currentValue);
-    }
-    skillSelect.innerHTML = '';
-    merged.forEach((value) => {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = value || 'auto';
-      if (value === currentValue) {
-        option.selected = true;
+    function renderSkillOptions() {
+      if (!skillSelect) {
+        return;
       }
-      skillSelect.appendChild(option);
-    });
-  }
-  renderSkillOptions();
-  setModelRefreshState(false);
+      let currentValue = runtimeOptions.skill || '';
+      const merged = [''].concat(availableSkills || []);
+      if (currentValue && !merged.includes(currentValue)) {
+        currentValue = '';
+        runtimeOptions = Object.assign({}, runtimeOptions, { skill: '' });
+        persistHistory();
+      }
+      skillSelect.innerHTML = '';
+      merged.forEach((value) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value || 'auto';
+        if (value === currentValue) {
+          option.selected = true;
+        }
+        skillSelect.appendChild(option);
+      });
+    }
+    renderSkillOptions();
+    setModelRefreshState(false);
 
-  function persistHistory() {
-    vscode.setState(Object.assign({}, vscode.getState() || {}, {
-      inputHistory: inputHistory.slice(0, 100),
-      model: runtimeOptions.model,
-      reasoningEffort: runtimeOptions.reasoningEffort,
-      skill: runtimeOptions.skill
-    }));
-  }
+    function persistHistory() {
+      vscode.setState(Object.assign({}, vscode.getState() || {}, {
+        inputHistory: inputHistory.slice(0, 100),
+        model: runtimeOptions.model,
+        reasoningEffort: runtimeOptions.reasoningEffort,
+        skill: runtimeOptions.skill
+      }));
+    }
 
-  function persistRuntimeOptions() {
-    runtimeOptions = {
-      model: modelSelect ? modelSelect.value : '',
-      reasoningEffort: reasoningEffortSelect ? reasoningEffortSelect.value : '',
-      skill: skillSelect ? skillSelect.value : ''
-    };
-    vscode.setState(Object.assign({}, vscode.getState() || {}, {
-      inputHistory: inputHistory.slice(0, 100),
-      model: runtimeOptions.model,
-      reasoningEffort: runtimeOptions.reasoningEffort,
-      skill: runtimeOptions.skill
-    }));
-  }
+    function persistRuntimeOptions() {
+      runtimeOptions = {
+        model: modelSelect ? modelSelect.value : '',
+        reasoningEffort: reasoningEffortSelect ? reasoningEffortSelect.value : '',
+        skill: skillSelect ? skillSelect.value : ''
+      };
+      vscode.setState(Object.assign({}, vscode.getState() || {}, {
+        inputHistory: inputHistory.slice(0, 100),
+        model: runtimeOptions.model,
+        reasoningEffort: runtimeOptions.reasoningEffort,
+        skill: runtimeOptions.skill
+      }));
+    }
 
   // ── Simple Markdown → HTML ──
   function escapeHtml(text) {
@@ -3354,6 +3386,7 @@ function setStreaming(val) {
   if (reasoningEffortSelect) {
     reasoningEffortSelect.disabled = val;
   }
+    updateComposeActionButton();
   if (!val) {
     inputEl.focus();
   }
@@ -3373,6 +3406,18 @@ function endResponse() {
 function canSendMessage() {
   return Boolean(inputEl.value.trim() || attachedFiles.length > 0 || currentSelection);
 }
+
+  function updateComposeActionButton() {
+    if (!composeBtn) {
+      return;
+    }
+    const canStart = canSendMessage();
+    composeBtn.textContent = isStreaming ? '■' : '↑';
+    composeBtn.title = isStreaming ? '中断当前响应' : '发送消息';
+    composeBtn.setAttribute('aria-label', composeBtn.title);
+    composeBtn.classList.toggle('stop-mode', isStreaming);
+    composeBtn.disabled = !isStreaming && !canStart;
+  }
 
 function fallbackPromptForContextOnly() {
   if (attachedFiles.some((f) => f && f.isImage)) {
@@ -3461,6 +3506,16 @@ deleteSessionBtn.addEventListener('click', () => {
 addFileBtn.addEventListener('click', () => {
   vscode.postMessage({ type: 'addFile' });
 });
+
+  if (composeBtn) {
+    composeBtn.addEventListener('click', () => {
+      if (isStreaming) {
+        vscode.postMessage({ type: 'stop' });
+        return;
+      }
+      sendMessage();
+    });
+  }
 
 if (jumpToBottomBtn) {
   jumpToBottomBtn.addEventListener('click', () => {
@@ -3558,19 +3613,25 @@ if (modelSelect) {
 if (reasoningEffortSelect) {
   reasoningEffortSelect.addEventListener('change', persistRuntimeOptions);
 }
-if (skillSelect) {
-  skillSelect.addEventListener('change', persistRuntimeOptions);
-  skillSelect.addEventListener('focus', () => {
-    if (!isStreaming) {
-      requestRuntimeOptionsMeta(false);
-    }
-  });
-}
+  if (skillSelect) {
+    skillSelect.addEventListener('change', persistRuntimeOptions);
+    skillSelect.addEventListener('pointerdown', () => {
+      if (!isStreaming) {
+        requestRuntimeOptionsMeta(true);
+      }
+    });
+    skillSelect.addEventListener('focus', () => {
+      if (!isStreaming) {
+        requestRuntimeOptionsMeta(true);
+      }
+    });
+  }
 
 // Auto-resize textarea
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+  updateComposeActionButton();
 });
 
 // Paste image support
@@ -3703,6 +3764,7 @@ function renderContextChips() {
       + '<button class="chip-remove" data-action="removeFile" data-path="' + escapeHtml(f.filePath) + '">×</button>';
     contextArea.appendChild(chip);
   }
+  updateComposeActionButton();
 }
 
 contextArea.addEventListener('click', (e) => {
@@ -3841,6 +3903,7 @@ window.addEventListener('message', (event) => {
       renderLoadedSession(data.session);
       break;
     case 'startResponse':
+      setStreaming(true);
       startAssistantMessage();
       break;
     case 'thinkingStart': {
@@ -3919,6 +3982,8 @@ window.addEventListener('message', (event) => {
       break;
   }
 });
+
+  updateComposeActionButton();
 </script>
   </body>
   </html>`;
