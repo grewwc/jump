@@ -544,6 +544,30 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  // ─── Copy Selection Location ──────────────────────────────────────────────
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jumpHistory.copySelectionLocation', () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        return;
+      }
+      const selection = editor.selection;
+      if (selection.isEmpty) {
+        vscode.window.showInformationMessage('Jump History: No text selected');
+        return;
+      }
+      const filePath = editor.document.uri.fsPath;
+      const startLine = selection.start.line + 1; // 1-based
+      const endLine = selection.end.line + 1;
+      const location = endLine > startLine
+        ? `${filePath}:${startLine}-${endLine}`
+        : `${filePath}:${startLine}`;
+      vscode.env.clipboard.writeText(location);
+      vscode.window.showInformationMessage(`Copied: ${location}`);
+    })
+  );
+
   // Track editor selection changes for chat context
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection(() => {
